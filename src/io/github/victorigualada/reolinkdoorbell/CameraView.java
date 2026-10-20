@@ -167,6 +167,8 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
             public void microphoneActive() { post(() -> { if (talk == owner[0] && !disposed) { talking = true; styleTalk(); applyMute(); } }); }
             public void finished() { post(() -> { if (talk == owner[0]) { talk = null; talking = false; if (!disposed) { styleTalk(); applyMute(); } } }); }
         });
+        // Answering is a conversation: hear the visitor too.
+        if (listeningMuted || audioInterrupted) { audioInterrupted = false; listeningMuted = false; styleListen(); applyMute(); }
         owner[0] = next; talk = next; styleTalk(); next.start();
     }
     private void stopTalk() {
