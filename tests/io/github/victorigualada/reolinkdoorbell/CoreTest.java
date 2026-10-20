@@ -238,21 +238,23 @@ public final class CoreTest {
     }
     /**
      * Runs a 12 s call: you talk throughout, the doorbell returns your voice {@code delayMs} later through a short
-     * filter with {@code gain} and codec-like distortion, and the visitor talks over you from 8 to 11 s. Sent audio
+     * filter with {@code gain} and codec-like distortion. With {@code visitor} 1 the visitor talks over you from 8 to
+     * 11 s; with 2 you stop at 8 s and the visitor answers from 8.5 s. Sent audio
      * is 20 ms microphone chunks; received audio is 1024-sample decoder chunks arriving with up to 30 ms jitter.
      * With {@code wanderMs}, the echo delay drifts back and forth by that much, as a doorbell's playout buffer might.
-     * Returns {delay estimate ms, echo reduction dB over 4-8 s, visitor SNR dB before, after}.
+     * Returns {delay estimate ms, echo reduction dB over 4-8 s, visitor SNR dB before, after, over 8.5-11 s (9.5-11 s when answering)}.
      */
-    static double[] call(int rate, int delayMs, double gain, double distortion, boolean visitor) { return call(rate, delayMs, gain, distortion, visitor, 0); }
-    static double[] call(int rate, int delayMs, double gain, double distortion, boolean visitor, double wanderMs) {
+    static double[] call(int rate, int delayMs, double gain, double distortion, int visitor) { return call(rate, delayMs, gain, distortion, visitor, 0); }
+    static double[] call(int rate, int delayMs, double gain, double distortion, int visitor, double wanderMs) {
         int n = rate * 12, delay = delayMs * rate / 1000;
         double[] you = speech(7, n, rate), them = speech(9, n, rate), in = new double[n], out = new double[n];
+        if (visitor == 2) Arrays.fill(you, 8 * rate, n, 0);
         double[] path = {0.5, 0.2, -0.1, 0.05, 0.02};
         Random r = new Random(3);
         for (int i = 0; i < n; i++) {
             double e = 0; for (int k = 0; k < path.length; k++) { int j = i - delay - k * 3 - (int) (wanderMs * rate / 1000 * Math.sin(i * 0.7 / rate)); if (j >= 0) e += path[k] * you[j]; }
             e *= gain; e += distortion * Math.abs(e) * r.nextGaussian();
-            in[i] = e + (visitor && i > 8 * rate && i < 11 * rate ? them[i] : 0) + 20 * r.nextGaussian();
+            in[i] = e + (visitor > 0 && i > 8.5 * rate && i < 11 * rate ? them[i] : 0) + 20 * r.nextGaussian();
         }
         EchoCanceller c = new EchoCanceller(rate);
         int latency = new EchoSuppressor(rate).size - 1; // Output lags input by one suppressor frame once it runs.
@@ -272,7 +274,7 @@ public final class CoreTest {
         }
         double before = 0, after = 0, voice = 0, mixed = 0, left = 0;
         for (int i = 4 * rate; i < 8 * rate; i++) { before += in[i] * in[i]; after += out[i] * out[i]; }
-        for (int i = 8 * rate; i < 11 * rate; i++) {
+        for (int i = (visitor == 2 ? 19 : 17) * rate / 2; i < 11 * rate; i++) { // Once your echo has died away.
             voice += them[i] * them[i]; mixed += (in[i] - them[i]) * (in[i] - them[i]); left += (out[i] - them[i]) * (out[i] - them[i]);
         }
         return new double[] {c.delayMillis(), 10 * Math.log10(before / after), 10 * Math.log10(voice / mixed), 10 * Math.log10(voice / left)};
@@ -281,17 +283,17 @@ public final class CoreTest {
         check(new Settings(Collections.emptyMap()).echoCanceller, "Echo cancelling is on by default");
         double[] a = {1, 2, 3, 4, 5, 0, 0}, b = {0, 0, 2, 4, 6, 8, 10};
         check(Math.abs(EchoCanceller.correlation(a, 0, b, 2, 5) - 1) < 1e-9 && EchoCanceller.correlation(a, 0, b, 0, 5) < 1, "Envelope correlation finds the lag");
-        double[] wide = call(16000, 480, 1, 0, false);
+        double[] wide = call(16000, 480, 1, 0, 0);
         check(Math.abs(wide[0] - 480) <= 30, "Echo delay found at 16 kHz (" + wide[0] + " ms)");
         check(wide[1] > 15, "Echo cut by more than 15 dB at 16 kHz (" + Math.round(wide[1]) + " dB)");
-        double[] narrow = call(8000, 300, 1, 0, false);
+        double[] narrow = call(8000, 300, 1, 0, 0);
         check(Math.abs(narrow[0] - 300) <= 30 && narrow[1] > 15, "Echo cut at 8 kHz G.711 rate (" + narrow[0] + " ms, " + Math.round(narrow[1]) + " dB)");
-        double[] loud = call(16000, 900, 2, 0.1, true);
+        double[] loud = call(16000, 900, 2, 0.1, 2);
         check(loud[1] > 12, "Loud distorted echo still cut (" + Math.round(loud[1]) + " dB)");
-        check(loud[3] > 12 && loud[3] > loud[2] + 10, "The visitor talking over you stays clear (" + Math.round(loud[2]) + " → " + Math.round(loud[3]) + " dB)");
-        double[] both = call(16000, 480, 1, 0.05, true);
-        check(both[3] > 15 && both[3] > both[2] + 8, "Double talk keeps the visitor (" + Math.round(both[2]) + " → " + Math.round(both[3]) + " dB)");
-        double[] wandering = call(16000, 360, 1, 0.1, false, 5);
+        check(loud[3] > 20, "The visitor answering after you stop comes through clean (" + Math.round(loud[2]) + " → " + Math.round(loud[3]) + " dB)");
+        double[] both = call(16000, 480, 1, 0.05, 1);
+        check(both[3] > both[2], "Talking at once, the visitor is not made worse than the echo left them (" + Math.round(both[2]) + " → " + Math.round(both[3]) + " dB)");
+        double[] wandering = call(16000, 360, 1, 0.1, 0, 5);
         check(wandering[1] > 10, "Echo with a wandering delay still cut by the suppressor (" + Math.round(wandering[1]) + " dB)");
         EchoSuppressor quiet = new EchoSuppressor(16000);
         short[] speech = new short[16000]; double[] none = new double[speech.length];

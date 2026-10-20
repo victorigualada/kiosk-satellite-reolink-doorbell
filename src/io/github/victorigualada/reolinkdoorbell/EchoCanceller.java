@@ -25,6 +25,8 @@ package io.github.victorigualada.reolinkdoorbell;
 final class EchoCanceller {
     /** Filter span, centred on the estimated delay to absorb its error and jitter: 1024 taps at 16 kHz. */
     static final int SPAN_MS = 64;
+    /** How much sooner than the estimated delay the suppressor expects echo: the doorbell's delay wanders ±30 ms. */
+    static final int LEAD_MS = 40;
     static final int ENVELOPE_MS = 10, HISTORY_MS = 6000, MAX_DELAY_MS = 2000;
     static final double MIN_CORRELATION = 0.4, STEP = 0.4, REGULARIZATION = 1e3;
     /** Below this reference level (RMS, 16-bit) there is nothing to cancel and nothing to learn from. */
@@ -90,7 +92,7 @@ final class EchoCanceller {
     /** Removes the echo from {@code n} incoming samples in place; the first was decoded at {@code startMicros}. */
     void process(short[] d, int n, long startMicros) {
         if (n <= 0) return;
-        float[] x; long firstRef; long delay;
+        float[] x; double[] aligned; long firstRef; long delay;
         synchronized (this) {
             // Incoming timeline: the earliest (least delayed) mapping seen is the true one.
             double candidate = startMicros - received * 1e6 / rate;
@@ -112,14 +114,21 @@ final class EchoCanceller {
             alignment = offset;
             long centre = received - n + offset;
             firstRef = centre + taps / 2 - (taps - 1);
+            // The suppressor's reference leads by LEAD_MS: the echo may come back sooner than the estimate, since the
+            // doorbell's delay wanders; the suppressor holds each band's level long enough to cover it coming later.
+            aligned = new double[n];
+            for (int j = 0; j < n; j++) {
+                long k = centre + j + (long) rate * LEAD_MS / 1000;
+                aligned[j] = k >= 0 && k < written && k >= written - ring.length ? ring[(int) (k % ring.length)] : 0;
+            }
             x = new float[n + taps - 1];
             for (int i = 0; i < x.length; i++) {
                 long k = firstRef + i;
                 x[i] = k >= 0 && k < written && k >= written - ring.length ? ring[(int) (k % ring.length)] : 0;
             }
         }
-        double before = 0, sent = 0; double[] aligned = new double[n];
-        for (int j = 0; j < n; j++) { before += (double) d[j] * d[j]; aligned[j] = x[j + taps / 2 - 1]; sent += aligned[j] * aligned[j]; }
+        double before = 0, sent = 0;
+        for (int j = 0; j < n; j++) { before += (double) d[j] * d[j]; sent += aligned[j] * aligned[j]; }
         filter(d, n, x);
         suppressor.process(d, aligned, n);
         double after = 0; for (int j = 0; j < n; j++) after += (double) d[j] * d[j];

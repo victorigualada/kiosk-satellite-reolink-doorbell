@@ -12,10 +12,12 @@ package io.github.victorigualada.reolinkdoorbell;
  * <p>Short-time Fourier transform with square-root Hann windows at 50% overlap; adds one frame of latency (32 ms).
  */
 final class EchoSuppressor {
-    /** Deepest cut per band: -20 dB keeps the room sound natural instead of gating it. */
-    static final double FLOOR = 0.1;
+    /** Deepest cut per band: -30 dB, so your voice is gone while the room sound does not gate on and off. */
+    static final double FLOOR = 0.03;
     /** How much of the estimated echo to remove: over-subtract, since the estimate is rough. */
-    static final double OVER = 2;
+    static final double OVER = 3;
+    /** Per-frame hold of each band's reference level: covers about 100 ms of wandering delay and reverb. */
+    static final double HOLD = 0.8;
     /** Learned coupling never exceeds this: the doorbell does not send your voice back much louder than you spoke. */
     static final double MAX_COUPLING = 4;
 
@@ -63,13 +65,15 @@ final class EchoSuppressor {
             double y = inRe[k] * inRe[k] + inIm[k] * inIm[k];
             // Echo spreads over the next frames (reverb, codec frames, a wandering delay): hold the reference's power
             // with a short decay rather than trusting one frame's alignment.
-            echoSpread[k] = Math.max(refPower[k], echoSpread[k] * 0.6);
+            echoSpread[k] = Math.max(refPower[k], echoSpread[k] * HOLD);
             double x = echoSpread[k];
-            if (refPower[k] > 300.0 * size) { // Roughly RMS 25: you are actually talking.
-                // Learn how strongly each band comes back from this frame alone. A return far above what was learned is
-                // the visitor talking, not echo, and must not teach it that echo is loud.
-                double ratio = Math.min(MAX_COUPLING, y / refPower[k]);
-                if (ratio < 4 * coupling[k]) coupling[k] += 0.05 * (ratio - coupling[k]);
+            if (x > 300.0 * size) { // Roughly RMS 25: you are actually talking.
+                // Learn how strongly each band comes back against the held level the estimate uses. The held level
+                // outlasts the echo and your pauses, so low returns say little: follow the strong ones quickly and
+                // let it sink slowly. A return far above what was learned is the visitor talking, not echo.
+                double ratio = Math.min(MAX_COUPLING, y / x);
+                if (ratio > coupling[k]) { if (ratio < 4 * coupling[k]) coupling[k] += 0.1 * (ratio - coupling[k]); }
+                else coupling[k] += 0.01 * (ratio - coupling[k]);
             }
             double echo = coupling[k] * x;
             double target = y <= 0 ? FLOOR : Math.max(FLOOR, 1 - OVER * echo / y);
