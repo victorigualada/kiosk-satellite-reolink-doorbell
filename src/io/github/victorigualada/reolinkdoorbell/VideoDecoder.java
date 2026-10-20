@@ -37,6 +37,11 @@ final class VideoDecoder implements AutoCloseable {
     private boolean keyType(int t) { return hevc ? t >= 16 && t <= 23 : t == 5; }
     /** The view's surface and listener arrive after the connection when the stream starts before the viewer. */
     void attach(Surface surface, StreamPlayer.Listener listener) { this.surface = surface; this.listener = listener; }
+    /**
+     * Creates the codec from the SDP's parameter sets before the keyframe arrives, so its start-up overlaps the wait.
+     * If the keyframe brings different sets, input() recreates it as before.
+     */
+    void prepare() throws Exception { if (parameters == null && surface != null && complete() && !closed.get()) detect(); }
     private int type(byte[] nal) { return hevc ? (nal[0] & 0x7e) >> 1 : nal[0] & 31; }
     private boolean remember(byte[] nal) throws IOException {
         if (nal.length == 0) throw new IOException("Empty video parameter set");

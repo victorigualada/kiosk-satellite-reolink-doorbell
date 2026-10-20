@@ -38,18 +38,19 @@ final class StreamPlayer implements AutoCloseable {
     private long lastVideoFrame;
     // Start-up timing, shown once so a slow first image can be traced to the network or to the keyframe wait.
     private final long opened = System.nanoTime();
-    private volatile long playing, firstPacket, firstKey;
+    private volatile long playing, firstPacket, firstKey, viewReady;
     private boolean shownFirst;
     /** A null surface starts the stream ahead of the viewer; {@link #attach} hands it the view later. */
     StreamPlayer(Settings settings, Surface surface, Listener listener) {
         this.settings = settings; this.surface = surface; this.listener = surface == null ? QUIET : listener; muted = settings.startMuted;
+        if (surface != null) viewReady = opened;
     }
     /** Gives an early stream its view. False when it already ended, so the caller starts a fresh one. */
     boolean attach(Surface view, Listener target) {
         List<String> notes;
         synchronized (attachLock) {
             if (finished || closed.get() || surface != null) return false;
-            listener = target; surface = view; notes = new ArrayList<>(early); early.clear();
+            listener = target; surface = view; viewReady = System.nanoTime(); notes = new ArrayList<>(early); early.clear();
         }
         for (String note : notes) target.status(note, false);
         return true;
@@ -166,7 +167,7 @@ final class StreamPlayer implements AutoCloseable {
             return;
         }
         if (!decoder.attached) {
-            decoder.attached = true; decoder.videoDecoder.attach(view, listener());
+            decoder.attached = true; decoder.videoDecoder.attach(view, listener()); decoder.videoDecoder.prepare();
             while (!held.isEmpty()) decoder.input(held.poll(), heldTimes.poll());
             heldBytes = 0;
         }
@@ -177,9 +178,11 @@ final class StreamPlayer implements AutoCloseable {
         if (shownFirst) return;
         shownFirst = true;
         long key = firstKey == 0 ? lastVideoFrame : firstKey, packet = firstPacket == 0 ? key : firstPacket;
-        listener().status("First image after " + seconds(lastVideoFrame - opened) + ": connected " + seconds(playing - opened)
-            + ", first video " + seconds(packet - playing) + " later, keyframe " + seconds(key - packet)
-            + " later, decoded " + seconds(lastVideoFrame - key) + " later", false);
+        long ready = viewReady == 0 ? key : viewReady;
+        // Times are from the ring or tap. The view and the stream race; decoding starts when both are there.
+        listener().status("First image after " + seconds(lastVideoFrame - opened) + ": connected at " + seconds(playing - opened)
+            + ", first video at " + seconds(packet - opened) + ", keyframe at " + seconds(key - opened)
+            + ", viewer ready at " + seconds(ready - opened) + ", decoded " + seconds(lastVideoFrame - Math.max(key, ready)) + " after both", false);
     }
     static String seconds(long nanos) { return String.format(Locale.ROOT, "%.1f s", Math.max(0, nanos) / 1e9); }
     public void close() {
