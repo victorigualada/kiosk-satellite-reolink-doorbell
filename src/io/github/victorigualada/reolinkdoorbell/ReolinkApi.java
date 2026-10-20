@@ -35,9 +35,7 @@ final class ReolinkApi implements AutoCloseable {
             return parseDeviceInfo(value);
         } finally { logout(); }
     }
-    /** Logs in and returns the session token for a stream URL; pair with logout(). */
-    String token() throws Exception { login(); return token; }
-    void login() throws Exception {
+    private void login() throws Exception {
         JSONObject user = new JSONObject().put("Version", "0").put("userName", settings.username).put("password", settings.password);
         JSONObject value = value(call("Login", new JSONObject().put("User", user)), "Login");
         JSONObject t = value.optJSONObject("Token");
@@ -45,7 +43,7 @@ final class ReolinkApi implements AutoCloseable {
         if (!name.matches("[A-Za-z0-9]{1,64}")) throw new IOException("Doorbell login returned no session token");
         token = name;
     }
-    void logout() {
+    private void logout() {
         if (token.isEmpty() || closed.get()) return;
         try { call("Logout", new JSONObject()); } catch (Exception ignored) { /* The token expires on its own. */ }
         token = "";

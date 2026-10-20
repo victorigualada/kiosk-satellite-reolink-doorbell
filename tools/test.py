@@ -72,7 +72,7 @@ for field in manifest['settings']:
     earlier[field['key']] = field
 assert [c['id'] for c in manifest['commands']] == ['show', 'hide', 'ring']
 assert [t['id'] for t in manifest['triggers']] == ['ring']
-assert [b['id'] for b in manifest['buttons']] == ['validateConnection', 'measureStartup']
+assert [b['id'] for b in manifest['buttons']] == ['validateConnection']
 
 runtime_sources = '\n'.join(p.read_text() for p in (ROOT / 'src').rglob('*.java'))
 assert not any(s in runtime_sources for s in ('System.out.', 'System.err.', 'printStackTrace(', 'android.util.Log.')), 'No logging that could leak credentials'

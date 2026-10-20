@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "reolink-doorbell",
   "name": "Reolink Doorbell",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "minAndroidSdk": 26,
   "entryClass": "io.github.victorigualada.reolinkdoorbell.ReolinkPlugin",
   "description": "Live video and two-way audio with a wired or PoE Reolink doorbell, straight from the doorbell over RTSP. Opens on its own when the doorbell rings, using Home Assistant's visitor sensor, and can open the door through a Home Assistant lock. No go2rtc or restreamer needed.",
@@ -20,8 +20,7 @@
     {"id": "ring", "title": "Doorbell rang"}
   ],
   "buttons": [
-    {"id": "validateConnection", "title": "Test connection", "label": "Test", "group": "Doorbell", "description": "Logs in to the doorbell's HTTP API and reads its model and firmware. Does not start video.", "visibleWhen": {"key": "host", "notEmpty": true}},
-    {"id": "measureStartup", "title": "Measure video start-up", "label": "Measure", "group": "Advanced", "description": "Times how soon the doorbell starts sending video over RTSP and over its HTTP-FLV stream, twice each. Takes about a minute. Nothing is shown.", "visibleWhen": {"key": "host", "notEmpty": true}}
+    {"id": "validateConnection", "title": "Test connection", "label": "Test", "group": "Doorbell", "description": "Logs in to the doorbell's HTTP API and reads its model and firmware. Does not start video.", "visibleWhen": {"key": "host", "notEmpty": true}}
   ],
   "settings": [
     {"key": "host", "type": "string", "title": "Doorbell address", "default": "", "group": "Doorbell", "description": "IP or hostname of the doorbell, for example 192.168.1.50. Give it a fixed IP in your router."},
