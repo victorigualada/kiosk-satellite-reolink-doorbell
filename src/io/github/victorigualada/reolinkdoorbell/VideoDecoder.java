@@ -34,6 +34,7 @@ final class VideoDecoder implements AutoCloseable {
         // Decoder creation waits for input: SDP may omit sets, in which case
         // the first in-band VPS/SPS/PPS supplies the real dimensions/profile.
     }
+    private boolean keyType(int t) { return hevc ? t >= 16 && t <= 23 : t == 5; }
     private int type(byte[] nal) { return hevc ? (nal[0] & 0x7e) >> 1 : nal[0] & 31; }
     private boolean remember(byte[] nal) throws IOException {
         if (nal.length == 0) throw new IOException("Empty video parameter set");
@@ -68,6 +69,10 @@ final class VideoDecoder implements AutoCloseable {
         listener.size(parameters.displayWidth, parameters.displayHeight);
         startNext();
     }
+    private boolean lowLatency(MediaCodec codec) {
+        try { return codec.getCodecInfo().getCapabilitiesForType(Sdp.videoMime(track)).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency); }
+        catch (Exception e) { return false; }
+    }
     private static byte[] annex(byte[] nal) { byte[] result = new byte[nal.length + 4]; result[3] = 1; System.arraycopy(nal, 0, result, 4, nal.length); return result; }
     private void startNext() throws Exception {
         releaseCodec();
@@ -75,6 +80,8 @@ final class VideoDecoder implements AutoCloseable {
             DecoderOrder.Candidate selected = candidates.get(nextCandidate++);
             try {
                 codec = MediaCodec.createByCodecName(selected.name);
+                // A live doorbell needs no reordering: ask for each frame as soon as it decodes, where the codec allows it.
+                if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, lowLatency(codec) ? 1 : 0);
                 codec.configure(format, surface, null, 0); codec.start(); started = true; waitForKey = true; epoch = -1;
                 listener.status(track.codec + " " + parameters.displayWidth + "×" + parameters.displayHeight + " — " + (selected.software ? "software" : "hardware") + " decoder", false);
                 return;
@@ -87,11 +94,13 @@ final class VideoDecoder implements AutoCloseable {
         boolean changed = false, key = false;
         for (byte[] nal : VideoParameters.annexB(data)) {
             changed |= remember(nal); int t = type(nal);
-            key |= hevc ? t >= 16 && t <= 23 : t == 5;
+            key |= keyType(t);
         }
         if (changed && parameters != null) { releaseCodec(); parameters = null; }
         if (parameters == null) {
-            if (!complete()) return;
+            // Create the codec with the keyframe in hand: its in-band sets often differ from the SDP ones,
+            // and creating it earlier would mean creating it twice right when the first image is due.
+            if (!complete() || !key) return;
             detect();
         }
         if (closed.get() || codec == null || waitForKey && !key) return;

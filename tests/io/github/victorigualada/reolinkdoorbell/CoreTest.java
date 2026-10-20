@@ -102,6 +102,7 @@ public final class CoreTest {
         byte[] single = Protocol.rtp(new byte[] {0x65, 1, 2, 3}, 1, 1000, 7, 96); single[1] |= (byte) 0x80;
         byte[] frame = depacketizer.accept(new Protocol.Rtp(single));
         check(frame != null && frame.length == 8 && frame[3] == 1 && frame[4] == 0x65, "Single NAL becomes an Annex B access unit");
+        check(VideoParameters.keyframe(frame, false) && !VideoParameters.keyframe(new byte[] {0, 0, 0, 1, 0x41, 1}, false), "IDR is told apart from a P slice");
         byte[] start = Protocol.rtp(new byte[] {0x7c, (byte) 0x85, 9, 9}, 2, 2000, 7, 96);
         byte[] end = Protocol.rtp(new byte[] {0x7c, 0x45, 8}, 3, 2000, 7, 96); end[1] |= (byte) 0x80;
         check(depacketizer.accept(new Protocol.Rtp(start)) == null, "FU-A start waits for the end");

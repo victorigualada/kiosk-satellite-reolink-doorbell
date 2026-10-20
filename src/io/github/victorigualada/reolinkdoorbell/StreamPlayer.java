@@ -24,7 +24,7 @@ final class StreamPlayer implements AutoCloseable {
     private long lastVideoFrame;
     // Start-up timing, shown once so a slow first image can be traced to the network or to the keyframe wait.
     private final long opened = System.nanoTime();
-    private volatile long playing;
+    private volatile long playing, firstPacket, firstKey;
     private boolean shownFirst;
     StreamPlayer(Settings settings, Surface surface, Listener listener) {
         this.settings = settings; this.surface = surface; this.listener = listener; muted = settings.startMuted;
@@ -100,7 +100,9 @@ final class StreamPlayer implements AutoCloseable {
         Protocol.Rtp p = new Protocol.Rtp(message.body);
         if (p.payloadType != decoder.track.payload) return;
         if (decoder.video) {
+            if (firstPacket == 0) firstPacket = System.nanoTime();
             byte[] frame = "H265".equals(decoder.track.codec) ? h265.accept(p) : h264.accept(p);
+            if (frame != null && firstKey == 0 && VideoParameters.keyframe(frame, "H265".equals(decoder.track.codec))) firstKey = System.nanoTime();
             if (frame != null) decoder.input(frame, p.timestamp);
         } else {
             // RFC 3640 AAC-hbr with 13-bit size and 3-bit index; no fragmentation.
@@ -121,8 +123,10 @@ final class StreamPlayer implements AutoCloseable {
         lastVideoFrame = System.nanoTime();
         if (shownFirst) return;
         shownFirst = true;
-        listener.status("First image after " + seconds(lastVideoFrame - opened) + " (connected in " + seconds(playing - opened)
-            + ", then " + seconds(lastVideoFrame - playing) + " waiting for a keyframe)", false);
+        long key = firstKey == 0 ? lastVideoFrame : firstKey, packet = firstPacket == 0 ? key : firstPacket;
+        listener.status("First image after " + seconds(lastVideoFrame - opened) + ": connected " + seconds(playing - opened)
+            + ", first video " + seconds(packet - playing) + " later, keyframe " + seconds(key - packet)
+            + " later, decoded " + seconds(lastVideoFrame - key) + " later", false);
     }
     static String seconds(long nanos) { return String.format(Locale.ROOT, "%.1f s", Math.max(0, nanos) / 1e9); }
     public void close() {

@@ -66,6 +66,15 @@ final class VideoParameters {
         int width = mbs * 16, height = maps * 16 * (2 - frameOnly);
         return new VideoParameters(false, false, width, height, width - cropW * (left + right), height - cropH * (top + bottom), profile, level, bits, chroma);
     }
+    /** Whether an Annex B access unit holds an IDR (H264) or IRAP (H265) picture. */
+    static boolean keyframe(byte[] data, boolean hevc) throws IOException {
+        for (byte[] nal : annexB(data)) {
+            if (nal.length == 0) continue;
+            int t = hevc ? (nal[0] & 0x7e) >> 1 : nal[0] & 31;
+            if (hevc ? t >= 16 && t <= 23 : t == 5) return true;
+        }
+        return false;
+    }
     static List<byte[]> annexB(byte[] data) throws IOException {
         if (data.length > Protocol.MAX_FRAME) throw new IOException("Video frame exceeds safety limit");
         List<byte[]> units = new ArrayList<>(); int start = -1;
