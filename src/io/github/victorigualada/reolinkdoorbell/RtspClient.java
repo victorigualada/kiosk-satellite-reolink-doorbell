@@ -30,7 +30,7 @@ final class RtspClient implements AutoCloseable {
         String target = uri.toASCIIString();
         if (target.contains("\r") || target.contains("\n")) throw new IOException("Invalid RTSP URI");
         synchronized (writer) {
-            String message = method + " " + target + " RTSP/1.0\r\nCSeq: " + (++cseq) + "\r\nUser-Agent: ReolinkSatellite/0.2\r\n"
+            String message = method + " " + target + " RTSP/1.0\r\nCSeq: " + (++cseq) + "\r\nUser-Agent: ReolinkSatellite/0.3\r\n"
                 + auth.header(method, target) + (session.isEmpty() ? "" : "Session: " + session + "\r\n") + extra + "\r\n";
             out.write(message.getBytes("UTF-8")); out.flush();
             return cseq;
