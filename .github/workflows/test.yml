@@ -22,3 +22,8 @@ jobs:
         run: python3 tools/test.py
       - name: Build
         run: python3 tools/build.py --android-platform 35
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: reolink-doorbell-plugin
+          path: dist/*.zip
