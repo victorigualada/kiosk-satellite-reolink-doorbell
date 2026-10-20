@@ -1,0 +1,14 @@
+Reolink Doorbell for Kiosk Satellite
+Copyright 2026 OC
+
+This plugin reuses the RTSP, H.264/H.265 and AAC playback code, the viewer
+and the Home Assistant lock control from "UniFi Protect Doorbell for Kiosk
+Satellite" by Mark Andrew (https://github.com/mark-andrew/kiosk-satellite-unifi-doorbell),
+licensed under the Apache License, Version 2.0.
+
+The compile-time SDK under sdk/ and the build tools under tools/ come from the
+Kiosk Satellite Community SDK (https://github.com/jxlarrea/kiosk-satellite-plugins),
+licensed under the Apache License, Version 2.0.
+
+Reolink is a trademark of its owner. This is an independent community project,
+not endorsed by Reolink or the Kiosk Satellite project.
