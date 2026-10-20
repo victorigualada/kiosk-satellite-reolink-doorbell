@@ -237,5 +237,9 @@ public final class CoreTest {
         check(v.update(loud, 320, 20) && v.speaking(), "Speech starts ducking");
         check(!v.update(quiet, 320, 300) && v.speaking(), "Short pauses keep the duck");
         check(v.update(quiet, 320, 500) && !v.speaking(), "Ducking ends after the hangover");
+        VoiceActivity echo = new VoiceActivity(400);
+        check(!echo.update(loud, 320, 0, 6000) && !echo.speaking(), "The doorbell heard through the speaker is not the person speaking");
+        check(echo.update(loud, 320, 20, 1000) && echo.speaking(), "Speech louder than the speaker counts");
+        check(new Settings(Collections.emptyMap()).echo.equals("Normal"), "Echo reduction defaults to Normal");
     }
 }

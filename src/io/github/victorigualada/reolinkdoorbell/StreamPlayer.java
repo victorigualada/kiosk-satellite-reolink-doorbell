@@ -69,6 +69,10 @@ final class StreamPlayer implements AutoCloseable {
      */
     void setTalking(boolean value) { talking = value; if (!value) ducked = false; }
     void setDucked(boolean value) { ducked = value; }
+    private volatile double farLevel; private volatile long farAt;
+    /** RMS of what the speaker played in the last 200 ms, after volume; 0 when silent. */
+    double farLevel() { return System.nanoTime() - farAt < 200_000_000L ? farLevel : 0; }
+    private float volume() { return muted ? 0 : ducked ? ("Strong".equals(settings.echo) ? 0 : 0.15f) : 1; }
     private void run() {
         boolean connecting = true;
         try {
@@ -191,6 +195,11 @@ final class StreamPlayer implements AutoCloseable {
             + ", first video at " + seconds(packet - opened) + ", keyframe at " + seconds(key - opened)
             + ", viewer ready at " + seconds(ready - opened) + ", decoded " + seconds(lastVideoFrame - Math.max(key, ready)) + " after both", false);
     }
+    private static double rms(ByteBuffer pcm) {
+        int count = pcm.remaining() / 2; if (count == 0) return 0;
+        double sum = 0; for (int i = 0; i < count; i++) { int s = pcm.getShort(); sum += (double) s * s; }
+        return Math.sqrt(sum / count);
+    }
     static String seconds(long nanos) { return String.format(Locale.ROOT, "%.1f s", Math.max(0, nanos) / 1e9); }
     public void close() {
         closed.set(true);
@@ -260,9 +269,11 @@ final class StreamPlayer implements AutoCloseable {
                         if (video) lastVideoFrame = System.nanoTime();
                         else if (audio != null && info.size > 0) {
                             if (audioCall != talking) openTrack();
-                            audio.setVolume(muted ? 0 : ducked ? 0.15f : 1);
+                            float volume = volume(); audio.setVolume(volume);
                             ByteBuffer pcm = codec.getOutputBuffer(index);
-                            if (pcm != null) { pcm.position(info.offset); pcm.limit(info.offset + info.size); audio.write(pcm, info.size, AudioTrack.WRITE_NON_BLOCKING); }
+                            if (pcm != null) {
+                                pcm.position(info.offset); pcm.limit(info.offset + info.size);
+                                if (talking) { farLevel = rms(pcm.duplicate().order(java.nio.ByteOrder.LITTLE_ENDIAN)) * volume; farAt = System.nanoTime(); } audio.write(pcm, info.size, AudioTrack.WRITE_NON_BLOCKING); }
                         }
                     } finally { codec.releaseOutputBuffer(index, video && !closed.get()); }
                 }

@@ -5,7 +5,7 @@ import java.net.URI;
 import java.util.Map;
 
 final class Settings {
-    final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose;
+    final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose, echo;
     final float horizontal, vertical;
     final int rtspPort, httpPort, channel, controlSize, autoCloseSeconds, talkSeconds;
     final boolean startMuted, autoOpen, wakeScreen, talkEnabled, diagnostics;
@@ -32,6 +32,7 @@ final class Settings {
         lockEntity = entity(m, "lockEntity", "lock", "Choose a lock entity or leave Door lock empty");
         talkEnabled = flag(m, "talkEnabled", true);
         diagnostics = flag(m, "diagnostics", false);
+        echo = choice(m, "echo", "Normal", "Normal", "Strong", "Off");
         talkSeconds = number(m, "talkSeconds", 120, 15, 600);
         horizontal = number(m, "horizontal", 50, 0, 100) / 100f;
         vertical = number(m, "vertical", 50, 0, 100) / 100f;

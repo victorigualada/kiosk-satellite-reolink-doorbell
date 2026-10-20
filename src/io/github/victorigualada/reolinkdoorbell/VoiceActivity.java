@@ -8,6 +8,7 @@ package io.github.victorigualada.reolinkdoorbell;
 final class VoiceActivity {
     /** About -32 dBFS: above room noise after Android's noise suppression, below normal speech close to a tablet. */
     static final double THRESHOLD = 800;
+    static final double FAR_RATIO = 0.6;
     private final long hangoverMillis;
     private long lastVoice = Long.MIN_VALUE / 2;
     private boolean speaking;
@@ -21,8 +22,14 @@ final class VoiceActivity {
         return Math.sqrt(sum / samples);
     }
     /** Feeds one chunk; returns whether the speaking state changed. Speech holds for the hangover after the last loud chunk. */
-    boolean update(byte[] pcm, int length, long nowMillis) {
-        if (level(pcm, length) >= THRESHOLD) lastVoice = nowMillis;
+    boolean update(byte[] pcm, int length, long nowMillis) { return update(pcm, length, nowMillis, 0); }
+    /**
+     * As above, with the level the tablet's speaker is playing right now. The microphone also hears that speaker,
+     * so it only counts as the person speaking when it is clearly louder than the doorbell's sound playing.
+     */
+    boolean update(byte[] pcm, int length, long nowMillis, double far) {
+        double near = level(pcm, length);
+        if (near >= THRESHOLD && near >= far * FAR_RATIO) lastVoice = nowMillis;
         boolean next = nowMillis - lastVoice <= hangoverMillis;
         if (next == speaking) return false;
         speaking = next; return true;

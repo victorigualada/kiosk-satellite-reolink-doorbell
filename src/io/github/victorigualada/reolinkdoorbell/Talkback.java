@@ -17,7 +17,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * a=sendonly audio track and sends microphone RTP on it, interleaved. Never records or buffers speech to disk.
  */
 final class Talkback implements AutoCloseable {
-    interface Listener { void status(String text, boolean error); void microphoneActive(); void finished(); default void speaking(boolean speaking) {} }
+    interface Listener {
+        void status(String text, boolean error); void microphoneActive(); void finished();
+        default void speaking(boolean speaking) {}
+        /** The level the tablet's speaker is playing now, as PCM RMS. */
+        default double far() { return 0; }
+    }
+    /** How long speech holds after the last loud chunk: long enough to cover the doorbell sending the voice back. */
+    static final long HANGOVER_MS = 1200;
     static final String BACKCHANNEL = "Require: www.onvif.org/ver20/backchannel\r\n";
     static final String NO_BACKCHANNEL = "This doorbell does not offer two-way audio over RTSP; check its firmware";
     private final Context context; private final Settings settings; private final Listener listener;
@@ -29,7 +36,7 @@ final class Talkback implements AutoCloseable {
     private volatile Exception failure;
     private MediaCodec encoder; private boolean encoderStarted;
     private final java.util.List<android.media.audiofx.AudioEffect> effects = new java.util.ArrayList<>();
-    private final VoiceActivity voice = new VoiceActivity(400);
+    private final VoiceActivity voice = new VoiceActivity(HANGOVER_MS);
     Talkback(Context context, Settings settings, Listener listener) {
         this.context = context; this.settings = settings; this.listener = listener;
         deadline = System.nanoTime() + settings.talkSeconds * 1_000_000_000L;
@@ -142,7 +149,11 @@ final class Talkback implements AutoCloseable {
             listener.finished();
         }
     }
-    private void heard(byte[] pcm, int n) { if (voice.update(pcm, n, System.nanoTime() / 1_000_000)) listener.speaking(voice.speaking()); }
+    /** Tracks speech; in Strong mode, sends silence while the person is not speaking, so the doorbell never hears itself. */
+    private void heard(byte[] pcm, int n) {
+        if (voice.update(pcm, n, System.nanoTime() / 1_000_000, listener.far())) listener.speaking(voice.speaking());
+        if ("Strong".equals(settings.echo) && !voice.speaking()) java.util.Arrays.fill(pcm, 0, n, (byte) 0);
+    }
     /**
      * Android's echo canceller, noise suppressor and gain control on the microphone, where the tablet has them.
      * The canceller removes the doorbell's audio, played on the tablet's speaker, from what the microphone sends back.
