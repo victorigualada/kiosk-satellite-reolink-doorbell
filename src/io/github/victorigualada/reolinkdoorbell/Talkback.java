@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * a=sendonly audio track and sends microphone RTP on it, interleaved. Never records or buffers speech to disk.
  */
 final class Talkback implements AutoCloseable {
-    interface Listener { void status(String text, boolean error); void microphoneActive(); void finished(); }
+    interface Listener { void status(String text, boolean error); void microphoneActive(); void finished(); default void speaking(boolean speaking) {} }
     static final String BACKCHANNEL = "Require: www.onvif.org/ver20/backchannel\r\n";
     static final String NO_BACKCHANNEL = "This doorbell does not offer two-way audio over RTSP; check its firmware";
     private final Context context; private final Settings settings; private final Listener listener;
@@ -28,6 +28,8 @@ final class Talkback implements AutoCloseable {
     private volatile AudioRecord recorder;
     private volatile Exception failure;
     private MediaCodec encoder; private boolean encoderStarted;
+    private final java.util.List<android.media.audiofx.AudioEffect> effects = new java.util.ArrayList<>();
+    private final VoiceActivity voice = new VoiceActivity(400);
     Talkback(Context context, Settings settings, Listener listener) {
         this.context = context; this.settings = settings; this.listener = listener;
         deadline = System.nanoTime() + settings.talkSeconds * 1_000_000_000L;
@@ -73,8 +75,9 @@ final class Talkback implements AutoCloseable {
                 capture.startRecording();
             }
             if (capture.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) throw new IOException("Microphone is unavailable or in use");
+            String cancelling = attachEffects(capture.getAudioSessionId());
             listener.microphoneActive();
-            listener.status("Talking — " + (aac ? "AAC" : track.codec) + " — tap the green phone to stop", false);
+            listener.status("Talking — " + (aac ? "AAC" : track.codec) + ", echo cancelling " + cancelling + " — tap the green phone to stop", false);
             SecureRandom random = new SecureRandom();
             int sequence = random.nextInt(65536), ssrc = random.nextInt();
             long samples = 0, keepalive = System.nanoTime();
@@ -86,6 +89,7 @@ final class Talkback implements AutoCloseable {
                     int n = capture.read(pcm, 0, pcm.length);
                     if (n < 0) throw new IOException("Microphone capture failed; talk stopped");
                     if (n < 2) continue;
+                    heard(pcm, n);
                     byte[] payload = G711.encode(pcm, n, "PCMA".equals(track.codec));
                     sequence = send(client, channel, Protocol.rtp(payload, sequence, samples, ssrc, track.payload), sequence);
                     samples += payload.length;
@@ -97,6 +101,7 @@ final class Talkback implements AutoCloseable {
                     if (buffer == null) throw new IOException("Encoder input unavailable");
                     int n = capture.read(pcm, 0, Math.min(pcm.length, buffer.capacity()) & ~1);
                     if (n < 0) throw new IOException("Microphone capture failed; talk stopped");
+                    heard(pcm, n);
                     buffer.clear(); buffer.put(pcm, 0, n);
                     encoder.queueInputBuffer(index, 0, n, samples * 1000000L / track.rate, 0); samples += n / 2;
                 }
@@ -125,14 +130,40 @@ final class Talkback implements AutoCloseable {
             close();
             synchronized (gate) {
                 AudioRecord r = recorder; recorder = null;
+                for (android.media.audiofx.AudioEffect e : effects) try { e.release(); } catch (RuntimeException ignored) {}
+                effects.clear();
                 if (r != null) { try { r.release(); } catch (RuntimeException ignored) {} }
             }
             if (encoder != null) {
                 try { if (encoderStarted) encoder.stop(); } catch (RuntimeException ignored) {}
                 try { encoder.release(); } catch (RuntimeException ignored) {} encoder = null;
             }
+            if (voice.speaking()) listener.speaking(false);
             listener.finished();
         }
+    }
+    private void heard(byte[] pcm, int n) { if (voice.update(pcm, n, System.nanoTime() / 1_000_000)) listener.speaking(voice.speaking()); }
+    /**
+     * Android's echo canceller, noise suppressor and gain control on the microphone, where the tablet has them.
+     * The canceller removes the doorbell's audio, played on the tablet's speaker, from what the microphone sends back.
+     */
+    private String attachEffects(int session) {
+        boolean echo = false;
+        try {
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                android.media.audiofx.AcousticEchoCanceler e = android.media.audiofx.AcousticEchoCanceler.create(session);
+                if (e != null) { e.setEnabled(true); effects.add(e); echo = e.getEnabled(); }
+            }
+            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                android.media.audiofx.NoiseSuppressor e = android.media.audiofx.NoiseSuppressor.create(session);
+                if (e != null) { e.setEnabled(true); effects.add(e); }
+            }
+            if (android.media.audiofx.AutomaticGainControl.isAvailable()) {
+                android.media.audiofx.AutomaticGainControl e = android.media.audiofx.AutomaticGainControl.create(session);
+                if (e != null) { e.setEnabled(true); effects.add(e); }
+            }
+        } catch (RuntimeException ignored) { /* Effects are optional; talk works without them. */ }
+        return echo ? "on" : "unavailable";
     }
     private void startEncoder(int rate) throws IOException {
         MediaFormat format = MediaFormat.createAudioFormat("audio/mp4a-latm", rate, 1);

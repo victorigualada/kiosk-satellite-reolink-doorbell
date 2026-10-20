@@ -174,6 +174,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         Talkback next = new Talkback(getContext(), settings, new Talkback.Listener() {
             public void status(String text, boolean error) { post(() -> { if (talk == owner[0]) showMessage(text, error); }); }
             public void microphoneActive() { post(() -> { if (talk == owner[0] && !disposed) { talking = true; styleTalk(); applyMute(); } }); }
+            public void speaking(boolean speaking) { StreamPlayer p = player; if (p != null) p.setDucked(speaking); }
             public void finished() { post(() -> { if (talk == owner[0]) { talk = null; talking = false; if (!disposed) { styleTalk(); applyMute(); } } }); }
         });
         // Answering is a conversation: hear the visitor too.
@@ -196,7 +197,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         p.leftMargin = Math.round(r[0]); p.topMargin = Math.round(r[1]); p.gravity = Gravity.TOP | Gravity.LEFT; texture.setLayoutParams(p);
     }
     private void applyMute() {
-        if (player != null) player.setMuted(listeningMuted);
+        if (player != null) { player.setMuted(listeningMuted); player.setTalking(talking); }
         if (disposed || stopping || (player == null && !talking)) music.close(); else music.update(!listeningMuted && !audioInterrupted && player != null, talking);
     }
     public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {

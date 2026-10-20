@@ -7,6 +7,8 @@ import android.os.*;
 
 /** Transient requests only: never writes device/KS volume or music-group state.
  * Other apps may pause instead of ducking. KS players do not take audio focus.
+ * While talking it puts the device in communication mode on the loudspeaker, which Android's echo canceller
+ * needs, and restores the previous mode and routing when talking ends.
  */
 final class MusicFocus implements AutoCloseable {
     private final AudioManager manager;
@@ -29,8 +31,29 @@ final class MusicFocus implements AutoCloseable {
         owner[0] = candidate;
         try { if (manager.requestAudioFocus(candidate) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { request = candidate; mode = next; } }
         catch (RuntimeException ignored) { /* Optional, host/Android policy can deny focus. Never change volume instead. */ }
+        if (next == 2) call(true);
+    }
+    private int previousMode = -1;
+    private boolean previousSpeaker;
+    @SuppressWarnings("deprecation")
+    private void call(boolean on) {
+        if (manager == null) return;
+        try {
+            if (on && previousMode < 0) {
+                previousMode = manager.getMode(); previousSpeaker = manager.isSpeakerphoneOn();
+                manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                if (Build.VERSION.SDK_INT >= 31) {
+                    for (AudioDeviceInfo d : manager.getAvailableCommunicationDevices())
+                        if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) { manager.setCommunicationDevice(d); break; }
+                } else manager.setSpeakerphoneOn(true);
+            } else if (!on && previousMode >= 0) {
+                if (Build.VERSION.SDK_INT >= 31) manager.clearCommunicationDevice(); else manager.setSpeakerphoneOn(previousSpeaker);
+                manager.setMode(previousMode); previousMode = -1;
+            }
+        } catch (RuntimeException ignored) { /* Routing is best effort; talk still works without echo cancelling. */ }
     }
     public synchronized void close() {
+        call(false);
         AudioFocusRequest old = request; request = null; mode = 0;
         if (old != null && manager != null) try { manager.abandonAudioFocusRequest(old); } catch (RuntimeException ignored) {}
     }

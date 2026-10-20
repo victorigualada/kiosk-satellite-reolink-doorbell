@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); voice();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -223,5 +223,19 @@ public final class CoreTest {
         List<byte[]> units = VideoParameters.annexB(rewritten);
         check(units.size() == 2 && Arrays.equals(units.get(0), patched) && units.get(1)[0] == 0x65, "Access unit carries the patched SPS and the slice untouched");
         check(SpsPatch.accessUnit(new byte[] {0, 0, 0, 1, 0x41, 9}).length == 6, "Units without an SPS pass through");
+    }
+    static byte[] tone(int amplitude, int samples) {
+        byte[] b = new byte[samples * 2];
+        for (int i = 0; i < samples; i++) { int v = i % 2 == 0 ? amplitude : -amplitude; b[2 * i] = (byte) v; b[2 * i + 1] = (byte) (v >> 8); }
+        return b;
+    }
+    static void voice() {
+        check(Math.abs(VoiceActivity.level(tone(1000, 160), 320) - 1000) < 1, "Level is the RMS of the samples");
+        VoiceActivity v = new VoiceActivity(400);
+        byte[] quiet = tone(100, 160), loud = tone(3000, 160);
+        check(!v.update(quiet, 320, 0) && !v.speaking(), "Room noise is not speech");
+        check(v.update(loud, 320, 20) && v.speaking(), "Speech starts ducking");
+        check(!v.update(quiet, 320, 300) && v.speaking(), "Short pauses keep the duck");
+        check(v.update(quiet, 320, 500) && !v.speaking(), "Ducking ends after the hangover");
     }
 }

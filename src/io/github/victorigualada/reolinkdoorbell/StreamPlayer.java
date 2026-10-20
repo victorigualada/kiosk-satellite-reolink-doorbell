@@ -62,6 +62,13 @@ final class StreamPlayer implements AutoCloseable {
     }
     void start() { Thread t = new Thread(this::run, "reolink-stream"); t.setDaemon(true); t.start(); }
     void setMuted(boolean value) { muted = value; }
+    private volatile boolean talking, ducked;
+    /**
+     * While talking, play the doorbell as a voice call so Android's echo canceller hears it as the reference, and
+     * turn it down while the person at the kiosk speaks.
+     */
+    void setTalking(boolean value) { talking = value; if (!value) ducked = false; }
+    void setDucked(boolean value) { ducked = value; }
     private void run() {
         boolean connecting = true;
         try {
@@ -192,6 +199,7 @@ final class StreamPlayer implements AutoCloseable {
     private final class Decoder implements AutoCloseable {
         final Sdp.Track track; final boolean video;
         MediaCodec codec; AudioTrack audio; VideoDecoder videoDecoder;
+        int audioRate, audioChannels; boolean audioCall;
         long epoch = -1; boolean started, attached;
         Decoder(Sdp.Track track, boolean video) throws Exception {
             this.track = track; this.video = video;
@@ -245,24 +253,33 @@ final class StreamPlayer implements AutoCloseable {
                         if (count != 1 && count != 2) throw new IOException("Unsupported decoded audio channel count");
                         if (format.containsKey(MediaFormat.KEY_PCM_ENCODING) && format.getInteger(MediaFormat.KEY_PCM_ENCODING) != AudioFormat.ENCODING_PCM_16BIT)
                             throw new IOException("Unsupported decoded PCM format");
-                        int mask = count == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
-                        int minimum = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT);
-                        if (minimum <= 0) throw new IOException("Audio output configuration unavailable");
-                        audio = new AudioTrack.Builder().setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                            .setAudioFormat(new AudioFormat.Builder().setSampleRate(rate).setChannelMask(mask).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
-                            .setBufferSizeInBytes(Math.max(minimum, rate * count / 5)).setTransferMode(AudioTrack.MODE_STREAM).build(); audio.play();
+                        audioRate = rate; audioChannels = count; openTrack();
                     }
                 } else if (index >= 0) {
                     try {
                         if (video) lastVideoFrame = System.nanoTime();
                         else if (audio != null && info.size > 0) {
-                            audio.setVolume(muted ? 0 : 1);
+                            if (audioCall != talking) openTrack();
+                            audio.setVolume(muted ? 0 : ducked ? 0.15f : 1);
                             ByteBuffer pcm = codec.getOutputBuffer(index);
                             if (pcm != null) { pcm.position(info.offset); pcm.limit(info.offset + info.size); audio.write(pcm, info.size, AudioTrack.WRITE_NON_BLOCKING); }
                         }
                     } finally { codec.releaseOutputBuffer(index, video && !closed.get()); }
                 }
             }
+        }
+        /** Media while listening; a voice call while talking, so the echo canceller takes it as its reference. */
+        void openTrack() throws IOException {
+            if (audio != null) { try { audio.release(); } catch (RuntimeException ignored) {} audio = null; }
+            boolean call = talking;
+            int mask = audioChannels == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+            int minimum = AudioTrack.getMinBufferSize(audioRate, mask, AudioFormat.ENCODING_PCM_16BIT);
+            if (minimum <= 0) throw new IOException("Audio output configuration unavailable");
+            audio = new AudioTrack.Builder().setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(call ? AudioAttributes.USAGE_VOICE_COMMUNICATION : AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                .setAudioFormat(new AudioFormat.Builder().setSampleRate(audioRate).setChannelMask(mask).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+                .setBufferSizeInBytes(Math.max(minimum, audioRate * audioChannels / 5)).setTransferMode(AudioTrack.MODE_STREAM).build();
+            audio.play(); audioCall = call;
         }
         public void close() {
             if (videoDecoder != null) { videoDecoder.close(); videoDecoder = null; }
