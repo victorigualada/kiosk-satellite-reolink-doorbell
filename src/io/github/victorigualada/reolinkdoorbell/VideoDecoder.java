@@ -11,15 +11,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** One worker owns parameter discovery, hardware-first selection and fallback. */
 final class VideoDecoder implements AutoCloseable {
-    private final Sdp.Track track; private final Surface surface;
-    private final StreamPlayer.Listener listener; private final AtomicBoolean closed; private final Runnable rendered;
+    private final Sdp.Track track; private Surface surface;
+    private StreamPlayer.Listener listener; private final AtomicBoolean closed; private final Runnable rendered;
     private final boolean hevc;
     private final Map<Integer, byte[]> sets = new HashMap<>();
     private MediaCodec codec; private MediaFormat format; private VideoParameters parameters;
     private List<DecoderOrder.Candidate> candidates = Collections.emptyList();
     private int nextCandidate; private long epoch = -1; private boolean started, waitForKey = true;
-    VideoDecoder(Sdp.Track track, Surface surface, StreamPlayer.Listener listener, AtomicBoolean closed, Runnable rendered) throws Exception {
-        this.track = track; this.surface = surface; this.listener = listener; this.closed = closed; this.rendered = rendered; hevc = "H265".equals(track.codec);
+    VideoDecoder(Sdp.Track track, AtomicBoolean closed, Runnable rendered) throws Exception {
+        this.track = track; this.closed = closed; this.rendered = rendered; hevc = "H265".equals(track.codec);
         Sdp.videoMime(track);
         for (String key : hevc ? new String[] {"sprop-vps", "sprop-sps", "sprop-pps"} : new String[] {"sprop-parameter-sets"}) {
             String encoded = track.fmtp.get(key); if (encoded == null) continue;
@@ -35,6 +35,8 @@ final class VideoDecoder implements AutoCloseable {
         // the first in-band VPS/SPS/PPS supplies the real dimensions/profile.
     }
     private boolean keyType(int t) { return hevc ? t >= 16 && t <= 23 : t == 5; }
+    /** The view's surface and listener arrive after the connection when the stream starts before the viewer. */
+    void attach(Surface surface, StreamPlayer.Listener listener) { this.surface = surface; this.listener = listener; }
     private int type(byte[] nal) { return hevc ? (nal[0] & 0x7e) >> 1 : nal[0] & 31; }
     private boolean remember(byte[] nal) throws IOException {
         if (nal.length == 0) throw new IOException("Empty video parameter set");
@@ -56,7 +58,7 @@ final class VideoDecoder implements AutoCloseable {
             format.setByteBuffer("csd-0", ByteBuffer.wrap(annex(sets.get(7)))); format.setByteBuffer("csd-1", ByteBuffer.wrap(annex(sets.get(8))));
         }
         List<DecoderOrder.Candidate> available = new ArrayList<>();
-        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+        for (MediaCodecInfo info : codecs()) {
             if (info.isEncoder()) continue;
             try {
                 MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(Sdp.videoMime(track));
@@ -68,6 +70,12 @@ final class VideoDecoder implements AutoCloseable {
         candidates = DecoderOrder.choose(available); nextCandidate = 0;
         listener.size(parameters.displayWidth, parameters.displayHeight);
         startNext();
+    }
+    private static MediaCodecInfo[] codecList;
+    /** Listing the tablet's codecs can take a noticeable moment the first time; the plugin warms this up at start. */
+    static synchronized MediaCodecInfo[] codecs() {
+        if (codecList == null) codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
+        return codecList;
     }
     private boolean lowLatency(MediaCodec codec) {
         try { return codec.getCodecInfo().getCapabilitiesForType(Sdp.videoMime(track)).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency); }

@@ -44,8 +44,11 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private final Runnable idleCheck = this::checkIdle;
     private final Runnable hideStatus = this::hideStatus;
 
-    CameraView(Context context, KsTheme theme, Settings settings, Runnable closeAction, Runnable toggleLock) {
-        super(context); this.theme = theme; this.settings = settings; this.closeAction = closeAction; listeningMuted = settings.startMuted;
+    private StreamPlayer early;
+
+    /** {@code early} is a stream the plugin started while the overlay was opening, or null. The view owns it. */
+    CameraView(Context context, KsTheme theme, Settings settings, StreamPlayer early, Runnable closeAction, Runnable toggleLock) {
+        super(context); this.early = early; this.theme = theme; this.settings = settings; this.closeAction = closeAction; listeningMuted = settings.startMuted;
         idleTimer = new IdleTimeout(settings.autoCloseSeconds, android.os.SystemClock.uptimeMillis());
         music = new MusicFocus(context, () -> { stopTalk(); audioInterrupted = true; listeningMuted = true; styleListen(); applyMute(); message("Audio interrupted — tap Listen to resume", false); });
         setBackgroundColor(Color.BLACK); setKeepScreenOn(true); setClickable(true);
@@ -194,13 +197,21 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         if (disposed || stopping) return;
         final long token = playbackCallbacks.next();
         StreamPlayer previous = player; player = null; if (previous != null) previous.close();
-        StreamPlayer next = new StreamPlayer(settings, new Surface(st), new StreamPlayer.Listener() {
+        StreamPlayer.Listener events = new StreamPlayer.Listener() {
             // Connection, codec and timing notes are diagnostics; errors always show.
             public void status(String text, boolean error) { if (error || settings.diagnostics) postPlayback(token, () -> showMessage(text, error)); }
             public void size(int width, int height) { postPlayback(token, () -> { videoWidth = width; videoHeight = height; layoutImage(); }); }
             public void failed() { postPlayback(token, () -> { playbackCallbacks.next(); if (player != null) { player.close(); player = null; } music.close(); }); }
-        });
-        player = next; if (stopping) next.close(); applyMute(); next.start(); layoutImage();
+        };
+        StreamPlayer warm = early; early = null;
+        Surface surface = new Surface(st);
+        StreamPlayer next;
+        if (warm != null && warm.attach(surface, events)) next = warm;
+        else {
+            if (warm != null) warm.close();
+            next = new StreamPlayer(settings, surface, events); next.start();
+        }
+        player = next; if (stopping) next.close(); applyMute(); layoutImage();
     }
     private void postPlayback(long token, Runnable action) { post(() -> { if (!disposed && !stopping && playbackCallbacks.current(token)) action.run(); }); }
     public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {}
@@ -225,6 +236,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         playbackCallbacks.next();
         music.close();
         Talkback t = talk; if (t != null) t.close();
+        StreamPlayer e = early; early = null; if (e != null) e.close();
         StreamPlayer p = player; if (p != null) p.close();
     }
     public void onActivityPaused(Activity activity) { stopTransports(); post(() -> { if (!disposed) { dispose(); closeAction.run(); } }); }

@@ -12,6 +12,8 @@ public final class ReolinkPlugin implements KioskPlugin {
     private volatile PluginHost host;
     private volatile Settings settings = new Settings(Collections.emptyMap());
     private volatile CameraView view;
+    /** A stream started by show() that no view has taken yet. */
+    private volatile StreamPlayer warming;
     private HaLocks locks;
     private String watchedVisitor = "";
     private final VisitorWatch visitor = new VisitorWatch(5000);
@@ -27,6 +29,7 @@ public final class ReolinkPlugin implements KioskPlugin {
             public void error(String message) { CameraView current = view; if (current != null) current.showError(message); }
         });
         apply(values);
+        Thread codecs = new Thread(VideoDecoder::codecs, "reolink-codecs"); codecs.setDaemon(true); codecs.start();
     }
     public void configure(Map<String, Object> values) { hide(); apply(values); }
     private void apply(Map<String, Object> values) {
@@ -70,12 +73,16 @@ public final class ReolinkPlugin implements KioskPlugin {
         try { snapshot.requireConnection(); } catch (IllegalArgumentException e) { status(Failures.describe(e, "Configure the doorbell first"), true); return; }
         hide();
         final int token = generation.get(); PluginHost h = host; if (h == null) return;
+        // Connect now, while the screen wakes and the overlay opens; the view picks the stream up.
+        StreamPlayer early = new StreamPlayer(snapshot, null, null); early.start();
+        warming = early;
         OverlaySpec spec = OverlaySpec.fullScreen().closeOnBack(true);
         try { spec = spec.onTop(true); } catch (LinkageError ignored) { /* Older hosts draw it under the screensaver. */ }
         h.showOverlay("camera", spec, new OverlayFactory() {
             public View create(Context context, KsTheme theme) {
                 final CameraView[] owner = new CameraView[1];
-                CameraView created = new CameraView(context, theme, snapshot,
+                StreamPlayer stream = early == warming ? early : null; if (stream != null) warming = null;
+                CameraView created = new CameraView(context, theme, snapshot, stream,
                     () -> { if (generation.get() == token && view == owner[0]) hide(); },
                     () -> { if (generation.get() == token && view == owner[0]) locks.toggle(); });
                 owner[0] = created;
@@ -91,6 +98,7 @@ public final class ReolinkPlugin implements KioskPlugin {
     }
     private void hide() {
         generation.incrementAndGet(); CameraView current = view; view = null;
+        StreamPlayer pending = warming; warming = null; if (pending != null) pending.close();
         if (locks != null) locks.cancelAction();
         if (current != null) { current.stopTransports(); current.post(current::dispose); }
         PluginHost h = host; if (h != null) h.hideOverlay("camera");
@@ -146,6 +154,7 @@ public final class ReolinkPlugin implements KioskPlugin {
         generation.incrementAndGet(); host = null; watchedVisitor = "";
         cancelValidation();
         if (locks != null) locks.stop();
+        StreamPlayer pending = warming; warming = null; if (pending != null) pending.close();
         CameraView current = view; view = null; if (current != null) { current.stopTransports(); current.post(current::dispose); }
     }
 }
