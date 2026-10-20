@@ -7,8 +7,8 @@ import java.util.Map;
 final class Settings {
     final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose;
     final float horizontal, vertical;
-    final int rtspPort, httpPort, channel, controlSize, autoCloseSeconds;
-    final boolean https, startMuted, autoOpen, wakeScreen;
+    final int rtspPort, httpPort, channel, controlSize, autoCloseSeconds, talkSeconds;
+    final boolean https, startMuted, autoOpen, wakeScreen, talkEnabled;
 
     Settings(Map<String, Object> m) {
         host = text(m, "host").trim();
@@ -25,15 +25,17 @@ final class Settings {
         stream = choice(m, "stream", "sub", "sub", "main");
         sizing = choice(m, "sizing", "Fit", "Fit", "Fill", "Stretch");
         viewport = choice(m, "viewport", "Auto", "Auto", "4:3", "16:9", "16:10");
-        controls = choice(m, "controls", "Top", "Top", "Bottom", "Left", "Right");
+        controls = choice(m, "controls", "Bottom", "Bottom", "Top", "Left", "Right");
         autoClose = choice(m, "autoClose", "1 minute", "Off", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes");
         autoCloseSeconds = "Off".equals(autoClose) ? 0 : "30 seconds".equals(autoClose) ? 30 : "1 minute".equals(autoClose) ? 60
             : "2 minutes".equals(autoClose) ? 120 : "5 minutes".equals(autoClose) ? 300 : 600;
         visitorEntity = entity(m, "visitorEntity", "binary_sensor", "Choose the doorbell's visitor binary sensor or leave it empty");
         lockEntity = entity(m, "lockEntity", "lock", "Choose a lock entity or leave Door lock empty");
+        talkEnabled = flag(m, "talkEnabled", true);
+        talkSeconds = number(m, "talkSeconds", 120, 15, 600);
         horizontal = number(m, "horizontal", 50, 0, 100) / 100f;
         vertical = number(m, "vertical", 50, 0, 100) / 100f;
-        controlSize = number(m, "controlSize", 56, 48, 96);
+        controlSize = number(m, "controlSize", 64, 48, 96);
         startMuted = flag(m, "startMuted", false);
         autoOpen = flag(m, "autoOpen", true);
         wakeScreen = flag(m, "wakeScreen", true);

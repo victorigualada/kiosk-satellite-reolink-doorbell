@@ -16,19 +16,23 @@ final class Sdp {
         return "video/hevc";
     }
     static final class Track {
-        String kind, codec = "", control = "";
+        String kind, codec = "", control = "", direction = "sendrecv";
         int payload, rate, channels = 1;
         final Map<String, String> fmtp = new HashMap<>();
     }
     static List<Track> parse(String text) throws IOException {
-        List<Track> tracks = new ArrayList<>(); Track t = null;
+        List<Track> tracks = new ArrayList<>(); Track t = null; String direction = "sendrecv";
         try {
             for (String raw : text.split("\r?\n")) {
                 String l = raw.trim();
-                if (l.startsWith("m=")) {
+                if (l.equals("a=sendonly") || l.equals("a=recvonly") || l.equals("a=sendrecv") || l.equals("a=inactive")) {
+                    if (t == null) direction = l.substring(2); else t.direction = l.substring(2);
+                } else if (l.startsWith("m=")) {
                     String[] p = l.substring(2).split(" +");
                     if (p.length < 4 || !"RTP/AVP".equals(p[2])) throw new IOException("Unsupported secure/multipayload SDP transport");
-                    t = new Track(); t.kind = p[0]; t.payload = Integer.parseInt(p[3]); tracks.add(t);
+                    t = new Track(); t.kind = p[0]; t.payload = Integer.parseInt(p[3]); t.direction = direction; tracks.add(t);
+                    // Static G.711 payload types may come without an rtpmap line.
+                    if (t.payload == 0 || t.payload == 8) { t.codec = t.payload == 0 ? "PCMU" : "PCMA"; t.rate = 8000; }
                 } else if (t != null && l.startsWith("a=control:")) t.control = l.substring(10);
                 else if (t != null && l.startsWith("a=rtpmap:" + t.payload + " ")) {
                     String[] p = l.substring(l.indexOf(' ') + 1).split("/");
@@ -44,6 +48,21 @@ final class Sdp {
         for (Track track : tracks) if (track.rate <= 0 || track.payload < 0 || track.payload > 127 || track.control.isEmpty())
             throw new IOException("Incomplete stream track description");
         return tracks;
+    }
+    /** Codecs the talk channel can encode, best first. */
+    static final List<String> TALK_CODECS = Arrays.asList("PCMU", "PCMA", "MPEG4-GENERIC");
+    /** The ONVIF backchannel: an audio track the client sends on, marked a=sendonly by the doorbell. Null when there is none. */
+    static Track backchannel(List<Track> tracks) {
+        Track best = null;
+        for (Track t : tracks) {
+            if (!"audio".equals(t.kind) || !"sendonly".equals(t.direction) || !TALK_CODECS.contains(t.codec)) continue;
+            if (best == null || TALK_CODECS.indexOf(t.codec) < TALK_CODECS.indexOf(best.codec)) best = t;
+        }
+        return best;
+    }
+    static boolean hasBackchannel(List<Track> tracks) {
+        for (Track t : tracks) if ("audio".equals(t.kind) && "sendonly".equals(t.direction)) return true;
+        return false;
     }
     static URI control(URI base, String value) throws IOException {
         try {

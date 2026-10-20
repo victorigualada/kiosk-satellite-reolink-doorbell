@@ -45,6 +45,8 @@ fields = {s['key']: s for s in manifest['settings']}
 assert fields['password']['type'] == 'secret' and fields['password']['default'] == ''
 assert fields['visitorEntity']['type'] == 'entity' and fields['visitorEntity']['domain'] == 'binary_sensor'
 assert fields['lockEntity']['type'] == 'entity' and fields['lockEntity']['domain'] == 'lock'
+assert fields['talkEnabled']['default'] is True and fields['talkSeconds']['visibleWhen'] == {'key': 'talkEnabled', 'equals': True}
+assert fields['controls']['default'] == 'Bottom'
 assert fields['rtspPort']['type'] == 'string' and fields['rtspPort']['default'] == '554'
 assert fields['stream']['default'] == 'sub' and fields['stream']['options'] == ['sub', 'main']
 for field in manifest['settings']:

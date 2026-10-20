@@ -16,18 +16,14 @@ final class StreamPlayer implements AutoCloseable {
     private final Surface surface;
     private final Listener listener;
     private final AtomicBoolean closed = new AtomicBoolean();
-    private volatile NetworkCleanup.Task socketCleanup;
+    private volatile RtspClient rtsp;
     private volatile boolean muted;
-    private InputStream in; private OutputStream out; private int cseq;
-    private String session = "";
-    private final RtspAuth auth;
     private final Map<Integer, Decoder> decoders = new HashMap<>();
     private final Protocol.H264 h264 = new Protocol.H264();
     private final Protocol.H265 h265 = new Protocol.H265();
     private long lastVideoFrame;
     StreamPlayer(Settings settings, Surface surface, Listener listener) {
         this.settings = settings; this.surface = surface; this.listener = listener; muted = settings.startMuted;
-        auth = new RtspAuth(settings.username, settings.password);
     }
     void start() { Thread t = new Thread(this::run, "reolink-stream"); t.setDaemon(true); t.start(); }
     void setMuted(boolean value) { muted = value; }
@@ -35,14 +31,11 @@ final class StreamPlayer implements AutoCloseable {
         boolean connecting = true;
         try {
             URI url = settings.streamUrl();
-            Socket connected = new Socket();
-            socketCleanup = new NetworkCleanup.Task(connected::close);
+            RtspClient client = new RtspClient(settings); rtsp = client;
             if (closed.get()) return;
-            connected.connect(new InetSocketAddress(url.getHost(), url.getPort()), 8000);
-            connected.setSoTimeout(15000); connected.setTcpNoDelay(true);
+            client.connect(url);
             if (closed.get()) return;
-            in = new BufferedInputStream(connected.getInputStream()); out = connected.getOutputStream();
-            Protocol.Message description = request("DESCRIBE", url, "Accept: application/sdp\r\n");
+            Protocol.Message description = client.request("DESCRIBE", url, "Accept: application/sdp\r\n");
             connecting = false; // SDP/codec errors are media errors, not connection failures.
             List<Sdp.Track> tracks = Sdp.parse(new String(description.body, "UTF-8"));
             URI base = url;
@@ -59,27 +52,24 @@ final class StreamPlayer implements AutoCloseable {
                 Decoder decoder = new Decoder(track, video);
                 decoders.put(channel, decoder);
                 connecting = true;
-                Protocol.Message setup = request("SETUP", Sdp.control(base, track.control), "Transport: RTP/AVP/TCP;unicast;interleaved=" + channel + "-" + (channel + 1) + "\r\n");
+                Protocol.Message setup = client.request("SETUP", Sdp.control(base, track.control), "Transport: RTP/AVP/TCP;unicast;interleaved=" + channel + "-" + (channel + 1) + "\r\n");
                 String transport = setup.headers.getOrDefault("transport", "");
                 if (!transport.toLowerCase(Locale.ROOT).contains("interleaved=" + channel + "-" + (channel + 1)))
                     throw new IOException("Doorbell did not accept requested interleaved RTP channels");
-                String returnedSession = setup.headers.getOrDefault("session", "").split(";")[0];
-                if (returnedSession.isEmpty() || returnedSession.contains("\r") || returnedSession.contains("\n")) throw new IOException("Missing RTSP session");
-                if (!session.isEmpty() && !session.equals(returnedSession)) throw new IOException("RTSP session changed during setup");
-                session = returnedSession;
+                client.session(setup);
                 hasVideo |= video; hasAudio |= audio; channel += 2;
                 connecting = false;
             }
             if (!hasVideo) throw new IOException("No compatible video track found");
-            connecting = true; request("PLAY", base, "Range: npt=0.000-\r\n"); connecting = false;
+            connecting = true; client.request("PLAY", base, "Range: npt=0.000-\r\n"); connecting = false;
             listener.status("Connected — " + videoLabel + " video" + (hasAudio ? " / AAC audio" : " (audio unavailable)"), false);
             long keepalive = System.nanoTime(); lastVideoFrame = keepalive;
             while (!closed.get()) {
-                Protocol.Message message = Protocol.read(in);
+                Protocol.Message message = client.read();
                 if (message.channel >= 0) packet(message);
                 else if (message.status < 200 || message.status >= 300) throw new IOException("RTSP keepalive rejected");
                 long now = System.nanoTime();
-                if (now - keepalive > 15_000_000_000L) { send("GET_PARAMETER", base, ""); keepalive = now; }
+                if (now - keepalive > 15_000_000_000L) { client.send("GET_PARAMETER", base, ""); keepalive = now; }
                 if (now - lastVideoFrame > 10_000_000_000L) {
                     boolean fallback = false;
                     for (Decoder decoder : decoders.values()) if (decoder.video && decoder.videoDecoder != null) fallback = decoder.videoDecoder.fallbackAfterStall();
@@ -99,37 +89,6 @@ final class StreamPlayer implements AutoCloseable {
             for (Decoder decoder : decoders.values()) decoder.close(); decoders.clear();
             try { surface.release(); } catch (RuntimeException ignored) {}
         }
-    }
-    private void send(String method, URI uri, String extra) throws IOException {
-        if (closed.get()) throw new IOException("Stream closed");
-        String target = uri.toASCIIString();
-        if (target.contains("\r") || target.contains("\n")) throw new IOException("Invalid RTSP URI");
-        String message = method + " " + target + " RTSP/1.0\r\nCSeq: " + (++cseq) + "\r\nUser-Agent: ReolinkSatellite/0.1\r\n"
-            + auth.header(method, target) + (session.isEmpty() ? "" : "Session: " + session + "\r\n") + extra + "\r\n";
-        out.write(message.getBytes("UTF-8")); out.flush();
-    }
-    private Protocol.Message request(String method, URI uri, String extra) throws Exception {
-        for (int attempt = 0; attempt < 2; attempt++) {
-            send(method, uri, extra);
-            Protocol.Message m = response();
-            if (m.status == 401) {
-                // First 401 carries the challenge; a second one with credentials means they are wrong.
-                if (attempt > 0 || settings.password.isEmpty()) throw new IOException("Doorbell rejected the username or password");
-                auth.challenge(m.headers.get("www-authenticate")); continue;
-            }
-            if (m.status == 404) throw new IOException("Doorbell has no such stream; check the channel and that RTSP is enabled");
-            if (m.status < 200 || m.status >= 300) throw new IOException("RTSP request rejected (status " + m.status + ")");
-            return m;
-        }
-        throw new IOException("Doorbell rejected the username or password");
-    }
-    private Protocol.Message response() throws Exception {
-        for (int i = 0; i < 1024; i++) {
-            Protocol.Message m = Protocol.read(in);
-            if (m.channel >= 0) continue;
-            if (!String.valueOf(cseq).equals(m.headers.get("cseq"))) throw new IOException("RTSP response sequence mismatch");
-            return m;
-        } throw new IOException("RTSP response not received");
     }
     private void packet(Protocol.Message message) throws Exception {
         Decoder decoder = decoders.get(message.channel); if (decoder == null) return;
@@ -155,7 +114,7 @@ final class StreamPlayer implements AutoCloseable {
     }
     public void close() {
         closed.set(true);
-        NetworkCleanup.Task task = socketCleanup; if (task != null) task.close();
+        RtspClient client = rtsp; if (client != null) client.close();
     }
     private final class Decoder implements AutoCloseable {
         final Sdp.Track track; final boolean video;

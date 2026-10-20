@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -49,6 +49,10 @@ public final class CoreTest {
         check(new Settings(blank).httpPort == 80, "Blank port falls back to the default");
         fails(() -> new Settings(Collections.emptyMap()).streamUrl(), "Set the doorbell", "Unconfigured settings cannot build a URL");
         check(new Settings(Collections.emptyMap()).autoOpen && new Settings(Collections.emptyMap()).wakeScreen, "Ring opens and wakes by default");
+        Settings defaults = new Settings(Collections.emptyMap());
+        check(defaults.talkEnabled && defaults.talkSeconds == 120 && defaults.controls.equals("Bottom"), "Talk on, 2 minute limit, call bar at the bottom by default");
+        Map<String, Object> limit = base(); limit.put("talkSeconds", 5);
+        fails(() -> new Settings(limit), "Out-of-range", "Talk limit is bounded");
     }
     static void digest() throws Exception {
         // RFC 2617 section 3.5 example.
@@ -124,5 +128,71 @@ public final class CoreTest {
         JSONArray other = new JSONArray("[{\"cmd\":\"GetDevInfo\",\"code\":1,\"error\":{\"detail\":\"not support <x>\",\"rspCode\":-9}}]");
         try { ReolinkApi.value(other, "GetDevInfo"); throw new AssertionError("error accepted"); }
         catch (java.io.IOException e) { check(e.getMessage().equals("Doorbell refused GetDevInfo: not support x (-9)"), "Other errors are sanitized"); }
+    }
+    static void talk() throws Exception {
+        check((G711.ulaw(0) & 255) == 0xFF && (G711.ulaw(32767) & 255) == 0x80 && (G711.ulaw(-32768) & 255) == 0x00, "G.711 mu-law reference points");
+        check((G711.alaw(0) & 255) == 0xD5 && (G711.alaw(32767) & 255) == 0xAA && (G711.alaw(-32768) & 255) == 0x2A, "G.711 A-law reference points");
+        check((G711.ulaw(1000) & 255) == 0xCE && (G711.alaw(1000) & 255) == 0xFA && (G711.alaw(-1000) & 255) == 0x7A && (G711.alaw(100) & 255) == 0xD3, "G.711 mid-range samples");
+        byte[] pcm = {(byte) 0xE8, 0x03, 0, 0, 0}; // 1000, 0, and an odd trailing byte.
+        byte[] law = G711.encode(pcm, pcm.length, false);
+        check(law.length == 2 && (law[0] & 255) == 0xCE && (law[1] & 255) == 0xFF, "Little-endian PCM encodes sample by sample");
+        String text = "v=0\r\no=- 1 1 IN IP4 192.168.1.50\r\ns=x\r\nt=0 0\r\n"
+            + "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:trackID=1\r\na=recvonly\r\n"
+            + "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/16000\r\na=control:trackID=2\r\na=recvonly\r\n"
+            + "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/16000\r\na=control:trackID=3\r\na=sendonly\r\n"
+            + "m=audio 0 RTP/AVP 0\r\na=control:trackID=4\r\na=sendonly\r\n";
+        List<Sdp.Track> tracks = Sdp.parse(text);
+        Sdp.Track back = Sdp.backchannel(tracks);
+        check(back != null && back.control.equals("trackID=4") && back.codec.equals("PCMU") && back.rate == 8000, "Backchannel prefers G.711, static payload without rtpmap");
+        check(Sdp.backchannel(tracks.subList(0, 3)).control.equals("trackID=3"), "AAC backchannel when no G.711");
+        check(Sdp.backchannel(tracks.subList(0, 2)) == null && !Sdp.hasBackchannel(tracks.subList(0, 2)), "No sendonly track means no talk");
+        List<Sdp.Track> opus = Sdp.parse("v=0\r\nm=audio 0 RTP/AVP 111\r\na=rtpmap:111 OPUS/48000/2\r\na=control:t\r\na=sendonly\r\n");
+        check(Sdp.backchannel(opus) == null && Sdp.hasBackchannel(opus), "Unsupported talk codec is told apart from no backchannel");
+        List<Sdp.Track> session = Sdp.parse("v=0\r\na=sendonly\r\nm=audio 0 RTP/AVP 8\r\na=control:t\r\n");
+        check(Sdp.backchannel(session).codec.equals("PCMA"), "Session-level direction applies to its tracks");
+        byte[] au = Talkback.aacPayload(new byte[300]);
+        check(au.length == 304 && au[0] == 0 && au[1] == 16 && (((au[2] & 255) << 5) | ((au[3] & 255) >>> 3)) == 300, "RFC 3640 AU header carries the frame size");
+        check(Talkback.interleavedChannel("RTP/AVP/TCP;unicast;interleaved=2-3") == 2, "Doorbell may move the talk channel");
+        try { Talkback.interleavedChannel("RTP/AVP;unicast;client_port=5000-5001"); throw new AssertionError("UDP accepted"); }
+        catch (java.io.IOException e) { check(e.getMessage().contains("TCP"), "UDP-only talk answer is refused"); }
+    }
+    /** A fake doorbell: Digest challenge, then a backchannel DESCRIBE reply, then one interleaved RTP frame from the client. */
+    static void rtsp() throws Exception {
+        java.net.ServerSocket server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress());
+        StringBuilder seen = new StringBuilder(); byte[][] frame = new byte[1][];
+        Thread fake = new Thread(() -> {
+            try (java.net.Socket s = server.accept()) {
+                java.io.InputStream in = new java.io.BufferedInputStream(s.getInputStream()); java.io.OutputStream out = s.getOutputStream();
+                Map<String, String> first = request(in); seen.append(first.get("require")).append('|').append(first.containsKey("authorization"));
+                out.write(("RTSP/1.0 401 Unauthorized\r\nCSeq: " + first.get("cseq") + "\r\nWWW-Authenticate: Digest realm=\"BC\", nonce=\"n1\"\r\n\r\n").getBytes("UTF-8"));
+                Map<String, String> second = request(in); seen.append('|').append(second.get("authorization").startsWith("Digest username=\"kiosk\""));
+                String sdp = "v=0\r\nm=audio 0 RTP/AVP 0\r\na=control:trackID=9\r\na=sendonly\r\n";
+                out.write(("RTSP/1.0 200 OK\r\nCSeq: " + second.get("cseq") + "\r\nContent-Length: " + sdp.length() + "\r\n\r\n" + sdp).getBytes("UTF-8"));
+                frame[0] = Protocol.read(in).body;
+            } catch (Exception e) { seen.append("|error ").append(e); }
+        });
+        fake.start();
+        Map<String, Object> m = base(); m.put("host", "127.0.0.1"); m.put("rtspPort", String.valueOf(server.getLocalPort()));
+        Settings settings = new Settings(m);
+        RtspClient client = new RtspClient(settings);
+        client.connect(settings.streamUrl());
+        Protocol.Message reply = client.exchange("DESCRIBE", settings.streamUrl(), "Accept: application/sdp\r\n" + Talkback.BACKCHANNEL);
+        check(reply.status == 200 && Sdp.backchannel(Sdp.parse(new String(reply.body, "UTF-8"))).control.equals("trackID=9"), "Backchannel DESCRIBE through Digest auth");
+        client.interleaved(0, Protocol.rtp(new byte[] {1, 2}, 1, 160, 7, 0));
+        fake.join(5000); client.close(); server.close();
+        check(seen.toString().equals("www.onvif.org/ver20/backchannel|false|true"), "Require header sent, credentials only after the challenge (" + seen + ")");
+        check(frame[0] != null && frame[0].length == 14 && frame[0][12] == 1, "Talk RTP goes out interleaved on the RTSP socket");
+    }
+    /** Reads one client request's headers, lower-cased; the clients here never send a request body. */
+    static Map<String, String> request(java.io.InputStream in) throws java.io.IOException {
+        Map<String, String> headers = new HashMap<>(); StringBuilder line = new StringBuilder();
+        for (int c; (c = in.read()) >= 0;) {
+            if (c != '\n') { if (c != '\r') line.append((char) c); continue; }
+            if (line.length() == 0) return headers;
+            int colon = line.indexOf(":");
+            if (colon > 0) headers.put(line.substring(0, colon).toLowerCase(Locale.ROOT), line.substring(colon + 1).trim());
+            line.setLength(0);
+        }
+        throw new java.io.EOFException();
     }
 }

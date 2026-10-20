@@ -17,7 +17,7 @@ final class Failures {
         // Only explicit application-owned IO errors, never messages from network/library code.
         StackTraceElement[] trace = e.getStackTrace();
         if (e.getClass() == java.io.IOException.class && trace.length > 0
-                && trace[0].getClassName().matches("io\\.github\\.victorigualada\\.reolinkdoorbell\\.(ReolinkApi|RtspAuth|Protocol(?:\\$(?:H264|H265))?|Sdp|StreamPlayer|StreamPlayer\\$Decoder|VideoParameters|VideoParameters\\$Bits|VideoDecoder)")) return e.getMessage();
+                && trace[0].getClassName().matches("io\\.github\\.victorigualada\\.reolinkdoorbell\\.(ReolinkApi|RtspAuth|RtspClient|Talkback|Protocol(?:\\$(?:H264|H265))?|Sdp|StreamPlayer|StreamPlayer\\$Decoder|VideoParameters|VideoParameters\\$Bits|VideoDecoder)")) return e.getMessage();
         return fallback;
     }
 }
