@@ -47,6 +47,9 @@ assert fields['visitorEntity']['type'] == 'entity' and fields['visitorEntity']['
 assert fields['lockEntity']['type'] == 'entity' and fields['lockEntity']['domain'] == 'lock'
 assert fields['talkEnabled']['default'] is True and fields['talkSeconds']['visibleWhen'] == {'key': 'talkEnabled', 'equals': True}
 assert fields['controls']['default'] == 'Bottom'
+# Community Plugins shows a 256 by 256 PNG of at most 256 KB.
+icon = (ROOT / 'assets' / manifest['icon']).read_bytes()
+assert icon[:8] == b'\x89PNG\r\n\x1a\n' and icon[16:24] == (256).to_bytes(4, 'big') * 2 and len(icon) <= 256 * 1024
 assert fields['rtspPort']['type'] == 'string' and fields['rtspPort']['default'] == '554'
 assert fields['stream']['default'] == 'sub' and fields['stream']['options'] == ['sub', 'main']
 for field in manifest['settings']:
