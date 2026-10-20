@@ -17,6 +17,7 @@ final class VideoDecoder implements AutoCloseable {
     private final Map<Integer, byte[]> sets = new HashMap<>();
     private MediaCodec codec; private MediaFormat format; private VideoParameters parameters;
     private List<DecoderOrder.Candidate> candidates = Collections.emptyList();
+    private final StringBuilder skipped = new StringBuilder();
     private int nextCandidate; private long epoch = -1; private boolean started, waitForKey = true;
     VideoDecoder(Sdp.Track track, AtomicBoolean closed, Runnable rendered) throws Exception {
         this.track = track; this.closed = closed; this.rendered = rendered; hevc = "H265".equals(track.codec);
@@ -61,12 +62,11 @@ final class VideoDecoder implements AutoCloseable {
         int profile = profile(parameters), level = level(parameters);
         if (profile == 0 || level == 0 || parameters.chroma != 1) throw new IOException("Selected video profile/chroma is not supported by this player");
         format = MediaFormat.createVideoFormat(Sdp.videoMime(track), parameters.width, parameters.height);
-        format.setInteger(MediaFormat.KEY_PROFILE, profile); format.setInteger(MediaFormat.KEY_LEVEL, level);
+        // No KEY_LEVEL: Reolink labels even its small sub stream level 5.1, which hardware decoders that handle the
+        // actual size fine refuse, leaving only the slower software decoder. The size check below still applies.
+        format.setInteger(MediaFormat.KEY_PROFILE, profile);
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Protocol.MAX_FRAME);
-        if (hevc) format.setByteBuffer("csd-0", ByteBuffer.wrap(Protocol.hevcConfiguration(Arrays.asList(sets.get(32), sets.get(33), sets.get(34)))));
-        else {
-            format.setByteBuffer("csd-0", ByteBuffer.wrap(annex(sets.get(7)))); format.setByteBuffer("csd-1", ByteBuffer.wrap(annex(sets.get(8))));
-        }
+        csd();
         List<DecoderOrder.Candidate> available = new ArrayList<>();
         for (MediaCodecInfo info : codecs()) {
             if (info.isEncoder()) continue;
@@ -77,7 +77,8 @@ final class VideoDecoder implements AutoCloseable {
                 available.add(new DecoderOrder.Candidate(info.getName(), software, supported));
             } catch (IllegalArgumentException ignored) { /* Other MIME, no usable capabilities. */ }
         }
-        candidates = DecoderOrder.choose(available); nextCandidate = 0;
+        candidates = DecoderOrder.choose(available); nextCandidate = 0; skipped.setLength(0);
+        for (DecoderOrder.Candidate c : available) if (!c.supported && !c.software) skipped.append(", ").append(c.name).append(" unsupported");
         listener.size(parameters.displayWidth, parameters.displayHeight);
         startNext();
     }
@@ -109,6 +110,11 @@ final class VideoDecoder implements AutoCloseable {
         try { return codec.getCodecInfo().getCapabilitiesForType(Sdp.videoMime(track)).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency); }
         catch (Exception e) { return false; }
     }
+    /** Codec configuration from the current sets; kept current so a decoder fallback starts from the latest ones. */
+    private void csd() throws IOException {
+        if (hevc) format.setByteBuffer("csd-0", ByteBuffer.wrap(Protocol.hevcConfiguration(Arrays.asList(sets.get(32), sets.get(33), sets.get(34)))));
+        else { format.setByteBuffer("csd-0", ByteBuffer.wrap(annex(sets.get(7)))); format.setByteBuffer("csd-1", ByteBuffer.wrap(annex(sets.get(8)))); }
+    }
     private static byte[] annex(byte[] nal) { byte[] result = new byte[nal.length + 4]; result[3] = 1; System.arraycopy(nal, 0, result, 4, nal.length); return result; }
     private void startNext() throws Exception {
         releaseCodec();
@@ -122,9 +128,10 @@ final class VideoDecoder implements AutoCloseable {
                 String vendor = vendorLowLatency(format, selected.name);
                 codec.configure(format, surface, null, 0); codec.start(); started = true; waitForKey = true; epoch = -1;
                 listener.status(track.codec + " " + parameters.displayWidth + "×" + parameters.displayHeight + " — " + (selected.software ? "software" : "hardware")
-                    + " decoder " + selected.name + ", low latency " + (standard ? "on" : vendor.isEmpty() ? "unavailable" : vendor), false);
+                    + " decoder " + selected.name + ", low latency " + (standard ? "on" : vendor.isEmpty() ? "unavailable" : vendor)
+                    + (skipped.length() == 0 ? "" : " (" + skipped.substring(2) + ")"), false);
                 return;
-            } catch (Exception ignored) { releaseCodec(); }
+            } catch (Exception ignored) { releaseCodec(); skipped.append(", ").append(selected.name).append(" failed"); }
         }
         if (!closed.get()) throw new IOException("No working hardware or software decoder for " + track.codec + " " + parameters.width + "x" + parameters.height + " (profile " + parameters.profile + ", " + parameters.bitDepth + "-bit). Try medium or low quality");
     }
@@ -136,7 +143,14 @@ final class VideoDecoder implements AutoCloseable {
             changed |= remember(nal); int t = type(nal);
             key |= keyType(t);
         }
-        if (changed && parameters != null) { releaseCodec(); parameters = null; }
+        if (changed && parameters != null) {
+            // A keyframe often repeats the SDP's sets with small differences. Keep the codec, which reads the
+            // in-band sets anyway, unless the picture itself changes.
+            VideoParameters next = complete() ? VideoParameters.sps(sets.get(hevc ? 33 : 7), hevc) : null;
+            if (next == null || next.width != parameters.width || next.height != parameters.height || next.profile != parameters.profile
+                    || next.chroma != parameters.chroma || next.bitDepth != parameters.bitDepth) { releaseCodec(); parameters = null; }
+            else { parameters = next; csd(); }
+        }
         if (parameters == null) {
             // Create the codec with the keyframe in hand: its in-band sets often differ from the SDP ones,
             // and creating it earlier would mean creating it twice right when the first image is due.
