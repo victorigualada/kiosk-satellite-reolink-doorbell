@@ -64,15 +64,22 @@ final class Sdp {
         for (Track t : tracks) if ("audio".equals(t.kind) && "sendonly".equals(t.direction)) return true;
         return false;
     }
+    /**
+     * Resolves a track's control URL. It is only ever the request target on the RTSP connection already open to the
+     * configured doorbell, never a new connection, so a different host or a missing port in it is harmless.
+     * Reolink firmware announces its own address, often without the port.
+     */
     static URI control(URI base, String value) throws IOException {
         try {
-            URI u = value.startsWith("rtsp:") || value.startsWith("rtsps:") ? URI.create(value)
-                : URI.create(base.toString().endsWith("/") ? base.toString() : base.toString() + "/").resolve(value);
-            if (u.getHost() == null || !u.getHost().equalsIgnoreCase(base.getHost()) || u.getUserInfo() != null
-                    || u.getRawFragment() != null || u.getPort() != base.getPort()
-                    || !("rtsp".equals(u.getScheme()) || "rtsps".equals(u.getScheme()))) throw new IllegalArgumentException();
+            String v = value.trim().replace(" ", "%20");
+            if (v.isEmpty() || v.equals("*")) return base;
+            URI u = v.regionMatches(true, 0, "rtsp:", 0, 5) || v.regionMatches(true, 0, "rtsps:", 0, 6) ? URI.create(v)
+                : URI.create(base.toString().endsWith("/") ? base.toString() : base.toString() + "/").resolve(v);
+            String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+            if (!("rtsp".equals(scheme) || "rtsps".equals(scheme)) || u.getRawUserInfo() != null || u.getRawFragment() != null)
+                throw new IllegalArgumentException();
             return u;
-        } catch (RuntimeException e) { throw new IOException("Unsafe or unsupported RTSP control URL"); }
+        } catch (RuntimeException e) { throw new IOException("Unsupported RTSP control URL from the doorbell"); }
     }
     static byte[] hex(String s) throws IOException {
         if (s == null || s.length() == 0 || s.length() % 2 != 0 || s.length() > 4096) throw new IOException("Missing or invalid codec configuration");

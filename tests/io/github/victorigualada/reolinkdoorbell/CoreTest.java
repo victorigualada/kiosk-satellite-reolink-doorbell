@@ -88,9 +88,14 @@ public final class CoreTest {
         check(tracks.get(1).codec.equals("MPEG4-GENERIC") && tracks.get(1).rate == 16000 && "13".equals(tracks.get(1).fmtp.get("sizelength")), "Reolink AAC audio track");
         java.net.URI base = java.net.URI.create("rtsp://192.168.1.50:554/Preview_01_sub/");
         check(Sdp.control(base, "trackID=1").toString().equals("rtsp://192.168.1.50:554/Preview_01_sub/trackID=1"), "Relative track control");
-        boolean refused = false;
-        try { Sdp.control(base, "rtsp://evil.example/x"); } catch (java.io.IOException e) { refused = true; }
-        check(refused, "Track control cannot point at another host");
+        check(Sdp.control(base, "rtsp://192.168.1.50/Preview_01_sub/trackID=1").toString().equals("rtsp://192.168.1.50/Preview_01_sub/trackID=1"), "Absolute control without the port is accepted");
+        check(Sdp.control(base, "*") == base && Sdp.control(base, "") == base, "Aggregate control means the base URL");
+        check(Sdp.control(java.net.URI.create("rtsp://192.168.1.50:554/Preview_01_sub"), "trackID=2").toString().endsWith(":554/Preview_01_sub/trackID=2"), "Relative control without a trailing slash");
+        for (String bad : new String[] {"http://192.168.1.50/x", "rtsp://user:pw@192.168.1.50/x", "rtsp://192.168.1.50/x#f"}) {
+            boolean refused = false;
+            try { Sdp.control(base, bad); } catch (java.io.IOException e) { refused = true; }
+            check(refused, "Control URL refused: " + bad);
+        }
     }
     static void h264() throws Exception {
         Protocol.H264 depacketizer = new Protocol.H264();
