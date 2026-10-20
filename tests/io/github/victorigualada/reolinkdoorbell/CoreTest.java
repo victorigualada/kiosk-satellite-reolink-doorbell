@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -200,5 +200,28 @@ public final class CoreTest {
             line.setLength(0);
         }
         throw new java.io.EOFException();
+    }
+    static void sps() throws Exception {
+        // Reolink-style High profile SPS without VUI, from the SDP test (Base64 Z2QAM6wVFKAoAPGQ).
+        byte[] plain = Base64.getDecoder().decode("Z2QAM6wVFKAoAPGQ");
+        check(SpsPatch.restriction(plain) == null, "Plain SPS has no bitstream restriction");
+        byte[] patched = SpsPatch.lowDelay(plain);
+        int[] r = SpsPatch.restriction(patched);
+        check(r != null && r[0] == 0 && r[1] >= 1, "Patched SPS promises no reordering");
+        VideoParameters a = VideoParameters.sps(plain, false), b = VideoParameters.sps(patched, false);
+        check(a.width == b.width && a.height == b.height && a.profile == b.profile && a.level == b.level, "Patch keeps size, profile and level");
+        check(Arrays.equals(SpsPatch.lowDelay(patched), patched), "Patching is idempotent");
+        // An SPS that already has VUI with timing and a reorder of 2 (x264 style).
+        byte[] timed = Base64.getDecoder().decode("Z2QAH6zZQFAFuhAAAAMAEAAAAwPI8YMZYA==");
+        int[] before = SpsPatch.restriction(timed);
+        byte[] fixed = SpsPatch.lowDelay(timed);
+        check(Arrays.equals(before, new int[] {2, 4}) && Arrays.equals(SpsPatch.restriction(fixed), new int[] {0, 4}) && VideoParameters.sps(fixed, false).width == VideoParameters.sps(timed, false).width,
+            "Existing VUI keeps its fields and loses the reorder (" + Arrays.toString(before) + ")");
+        byte[] au = new byte[4 + plain.length + 4 + 3];
+        au[3] = 1; System.arraycopy(plain, 0, au, 4, plain.length); au[4 + plain.length + 3] = 1; au[au.length - 3] = 0x65; au[au.length - 2] = 1; au[au.length - 1] = 2;
+        byte[] rewritten = SpsPatch.accessUnit(au);
+        List<byte[]> units = VideoParameters.annexB(rewritten);
+        check(units.size() == 2 && Arrays.equals(units.get(0), patched) && units.get(1)[0] == 0x65, "Access unit carries the patched SPS and the slice untouched");
+        check(SpsPatch.accessUnit(new byte[] {0, 0, 0, 1, 0x41, 9}).length == 6, "Units without an SPS pass through");
     }
 }

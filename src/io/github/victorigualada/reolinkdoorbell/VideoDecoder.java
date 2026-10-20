@@ -28,11 +28,16 @@ final class VideoDecoder implements AutoCloseable {
                 byte[] nal;
                 try { nal = android.util.Base64.decode(item, android.util.Base64.DEFAULT); }
                 catch (IllegalArgumentException e) { throw new IOException("Invalid video SDP parameter encoding"); }
-                remember(nal);
+                remember(hevc ? nal : lowDelay(nal));
             }
         }
         // Decoder creation waits for input: SDP may omit sets, in which case
         // the first in-band VPS/SPS/PPS supplies the real dimensions/profile.
+    }
+    /** The SPS promising no reordering, so the decoder shows each frame at once; other NAL units pass through. */
+    private static byte[] lowDelay(byte[] nal) {
+        if (nal.length == 0 || (nal[0] & 31) != 7) return nal;
+        try { return SpsPatch.lowDelay(nal); } catch (IOException e) { return nal; }
     }
     private boolean keyType(int t) { return hevc ? t >= 16 && t <= 23 : t == 5; }
     /** The view's surface and listener arrive after the connection when the stream starts before the viewer. */
@@ -82,6 +87,24 @@ final class VideoDecoder implements AutoCloseable {
         if (codecList == null) codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
         return codecList;
     }
+    /**
+     * Chip vendors' own low-latency switches, for decoders that hold frames back without them (as Moonlight does).
+     * Unknown keys are ignored by codecs. Returns which family was asked, or "".
+     */
+    static String vendorLowLatency(MediaFormat format, String name) {
+        String n = name.toLowerCase(Locale.ROOT);
+        if (n.startsWith("c2.qti") || n.startsWith("omx.qcom")) {
+            format.setInteger("vendor.qti-ext-dec-picture-order.enable", 1);
+            format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1); return "Qualcomm";
+        }
+        if (n.startsWith("c2.exynos") || n.startsWith("omx.exynos")) { format.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1); return "Exynos"; }
+        if (n.startsWith("c2.amlogic") || n.startsWith("omx.amlogic")) { format.setInteger("vendor.low-latency.enable", 1); return "Amlogic"; }
+        if (n.startsWith("c2.hisi") || n.startsWith("omx.hisi")) {
+            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1);
+            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1); return "HiSilicon";
+        }
+        return "";
+    }
     private boolean lowLatency(MediaCodec codec) {
         try { return codec.getCodecInfo().getCapabilitiesForType(Sdp.videoMime(track)).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency); }
         catch (Exception e) { return false; }
@@ -94,9 +117,12 @@ final class VideoDecoder implements AutoCloseable {
             try {
                 codec = MediaCodec.createByCodecName(selected.name);
                 // A live doorbell needs no reordering: ask for each frame as soon as it decodes, where the codec allows it.
-                if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, lowLatency(codec) ? 1 : 0);
+                boolean standard = Build.VERSION.SDK_INT >= 30 && lowLatency(codec);
+                if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, standard ? 1 : 0);
+                String vendor = vendorLowLatency(format, selected.name);
                 codec.configure(format, surface, null, 0); codec.start(); started = true; waitForKey = true; epoch = -1;
-                listener.status(track.codec + " " + parameters.displayWidth + "×" + parameters.displayHeight + " — " + (selected.software ? "software" : "hardware") + " decoder", false);
+                listener.status(track.codec + " " + parameters.displayWidth + "×" + parameters.displayHeight + " — " + (selected.software ? "software" : "hardware")
+                    + " decoder " + selected.name + ", low latency " + (standard ? "on" : vendor.isEmpty() ? "unavailable" : vendor), false);
                 return;
             } catch (Exception ignored) { releaseCodec(); }
         }
@@ -105,6 +131,7 @@ final class VideoDecoder implements AutoCloseable {
     void input(byte[] data, long timestamp) throws Exception {
         if (closed.get()) return;
         boolean changed = false, key = false;
+        if (!hevc) data = SpsPatch.accessUnit(data);
         for (byte[] nal : VideoParameters.annexB(data)) {
             changed |= remember(nal); int t = type(nal);
             key |= keyType(t);

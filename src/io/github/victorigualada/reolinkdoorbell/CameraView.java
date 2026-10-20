@@ -143,6 +143,12 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     }
     private void showMessage(String text, boolean error) {
         if (disposed) return;
+        // Diagnostics stack up to four notes so a start-up's steps can all be read; anything else replaces the last.
+        boolean stack = settings.diagnostics && !error && !statusError && status.getVisibility() == VISIBLE;
+        if (stack) {
+            String[] lines = (status.getText() + "\n" + text).split("\n");
+            text = String.join("\n", Arrays.copyOfRange(lines, Math.max(0, lines.length - 4), lines.length));
+        }
         statusError = error; status.setText(text); status.setTextColor(theme.color(error ? "error" : "onSurface")); status.setVisibility(VISIBLE);
         if (!error) { removeCallbacks(hideStatus); postDelayed(hideStatus, settings.diagnostics ? 10000 : 4000); }
     }
