@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "reolink-doorbell",
+  "name": "Reolink Doorbell",
+  "version": "0.1.0",
+  "minAndroidSdk": 26,
+  "entryClass": "io.github.victorigualada.reolinkdoorbell.ReolinkPlugin",
+  "description": "Live video and audio from a wired or PoE Reolink doorbell, straight from the doorbell over RTSP. Opens on its own when the doorbell rings, using Home Assistant's visitor sensor. No go2rtc or restreamer needed.",
+  "author": "OC",
+  "license": "Apache-2.0",
+  "capabilities": ["overlay", "host.read", "host.control", "ha"],
+  "commands": [
+    {"id": "show", "title": "Open Reolink doorbell"},
+    {"id": "hide", "title": "Close Reolink doorbell"},
+    {"id": "ring", "title": "Simulate a doorbell ring"}
+  ],
+  "triggers": [
+    {"id": "ring", "title": "Doorbell rang"}
+  ],
+  "buttons": [
+    {"id": "validateConnection", "title": "Test connection", "label": "Test", "group": "Doorbell", "description": "Logs in to the doorbell's HTTP API and reads its model and firmware. Does not start video.", "visibleWhen": {"key": "host", "notEmpty": true}}
+  ],
+  "settings": [
+    {"key": "host", "type": "string", "title": "Doorbell address", "default": "", "group": "Doorbell", "description": "IP or hostname of the doorbell, for example 192.168.1.50. Give it a fixed IP in your router."},
+    {"key": "username", "type": "string", "title": "Username", "default": "admin", "group": "Doorbell", "description": "A Reolink user on the doorbell. A dedicated user for the kiosk is best."},
+    {"key": "password", "type": "secret", "title": "Password", "default": "", "group": "Doorbell"},
+    {"key": "stream", "type": "select", "title": "Stream", "default": "sub", "options": ["sub", "main"], "group": "Doorbell", "description": "sub is lighter and starts faster; main is full resolution and may be too heavy for small tablets."},
+    {"key": "rtspPort", "type": "number", "title": "RTSP port", "default": 554, "min": 1, "max": 65535, "step": 1, "group": "Advanced", "description": "Enable RTSP in the Reolink app under Network > Advanced > Port settings."},
+    {"key": "httpPort", "type": "number", "title": "HTTP API port", "default": 80, "min": 1, "max": 65535, "step": 1, "group": "Advanced", "description": "Only used by Test connection."},
+    {"key": "https", "type": "boolean", "title": "Use HTTPS for the HTTP API", "default": false, "group": "Advanced", "description": "Needs a certificate Android trusts; the doorbell's own self-signed certificate is rejected."},
+    {"key": "channel", "type": "number", "title": "Channel", "default": 0, "min": 0, "max": 15, "step": 1, "group": "Advanced", "description": "0 for a doorbell connected directly. Only change it when connecting through a Reolink NVR."},
+    {"key": "visitorEntity", "type": "entity", "domain": "binary_sensor", "title": "Visitor sensor", "default": "", "group": "Ring", "description": "The doorbell's visitor binary sensor from Home Assistant's Reolink integration. Leave empty to only open the viewer manually."},
+    {"key": "autoOpen", "type": "boolean", "title": "Open the viewer when it rings", "default": true, "group": "Ring", "visibleWhen": {"key": "visitorEntity", "notEmpty": true}},
+    {"key": "wakeScreen", "type": "boolean", "title": "Wake the screen when it rings", "default": true, "group": "Ring", "visibleWhen": {"key": "visitorEntity", "notEmpty": true}},
+    {"key": "sizing", "type": "select", "title": "Image sizing", "default": "Fit", "options": ["Fit", "Fill", "Stretch"], "group": "Display", "description": "Fit shows the whole picture; Fill crops to the screen; Stretch fills without preserving proportions."},
+    {"key": "horizontal", "type": "number", "title": "Horizontal crop position", "default": 50, "min": 0, "max": 100, "step": 1, "group": "Display", "visibleWhen": {"key": "sizing", "equals": "Fill"}},
+    {"key": "vertical", "type": "number", "title": "Vertical crop position", "default": 50, "min": 0, "max": 100, "step": 1, "group": "Display", "visibleWhen": {"key": "sizing", "equals": "Fill"}},
+    {"key": "viewport", "type": "select", "title": "Viewport aspect", "default": "Auto", "options": ["Auto", "4:3", "16:9", "16:10"], "group": "Display"},
+    {"key": "controls", "type": "select", "title": "Control placement", "default": "Top", "options": ["Top", "Bottom", "Left", "Right"], "group": "Display"},
+    {"key": "controlSize", "type": "number", "title": "Control size (dp)", "default": 56, "min": 48, "max": 96, "step": 4, "group": "Display"},
+    {"key": "autoClose", "type": "select", "title": "Auto-close after inactivity", "default": "1 minute", "options": ["Off", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes"], "group": "Display"},
+    {"key": "startMuted", "type": "boolean", "title": "Start with audio muted", "default": false, "group": "Audio"},
+    {"key": "lockEntity", "type": "entity", "domain": "lock", "title": "Door lock (optional)", "default": "", "group": "Home Assistant", "description": "Shows a lock button in the viewer. A tap locks or unlocks at once, without confirmation."}
+  ]
+}
