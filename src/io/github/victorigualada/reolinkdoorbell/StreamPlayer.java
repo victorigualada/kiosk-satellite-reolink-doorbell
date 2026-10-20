@@ -22,6 +22,10 @@ final class StreamPlayer implements AutoCloseable {
     private final Protocol.H264 h264 = new Protocol.H264();
     private final Protocol.H265 h265 = new Protocol.H265();
     private long lastVideoFrame;
+    // Start-up timing, shown once so a slow first image can be traced to the network or to the keyframe wait.
+    private final long opened = System.nanoTime();
+    private volatile long playing;
+    private boolean shownFirst;
     StreamPlayer(Settings settings, Surface surface, Listener listener) {
         this.settings = settings; this.surface = surface; this.listener = listener; muted = settings.startMuted;
     }
@@ -62,7 +66,8 @@ final class StreamPlayer implements AutoCloseable {
             }
             if (!hasVideo) throw new IOException("No compatible video track found");
             connecting = true; client.request("PLAY", base, "Range: npt=0.000-\r\n"); connecting = false;
-            listener.status("Connected — " + videoLabel + " video" + (hasAudio ? " / AAC audio" : " (audio unavailable)"), false);
+            playing = System.nanoTime();
+            listener.status("Connected in " + seconds(playing - opened) + " — " + videoLabel + " video" + (hasAudio ? " / AAC audio" : " (audio unavailable)"), false);
             long keepalive = System.nanoTime(); lastVideoFrame = keepalive;
             while (!closed.get()) {
                 Protocol.Message message = client.read();
@@ -112,6 +117,14 @@ final class StreamPlayer implements AutoCloseable {
             if (at != p.offset + p.length) throw new IOException("Unsupported AAC packet trailer");
         }
     }
+    private void rendered() {
+        lastVideoFrame = System.nanoTime();
+        if (shownFirst) return;
+        shownFirst = true;
+        listener.status("First image after " + seconds(lastVideoFrame - opened) + " (connected in " + seconds(playing - opened)
+            + ", then " + seconds(lastVideoFrame - playing) + " waiting for a keyframe)", false);
+    }
+    static String seconds(long nanos) { return String.format(Locale.ROOT, "%.1f s", Math.max(0, nanos) / 1e9); }
     public void close() {
         closed.set(true);
         RtspClient client = rtsp; if (client != null) client.close();
@@ -125,7 +138,7 @@ final class StreamPlayer implements AutoCloseable {
             try {
                 MediaFormat format;
                 if (video) {
-                    videoDecoder = new VideoDecoder(track, surface, listener, closed, () -> lastVideoFrame = System.nanoTime());
+                    videoDecoder = new VideoDecoder(track, surface, listener, closed, StreamPlayer.this::rendered);
                     return;
                 } else {
                     if (track.channels < 1 || track.channels > 2 || track.rate < 8000 || track.rate > 96000
