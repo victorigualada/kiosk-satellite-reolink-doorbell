@@ -18,8 +18,8 @@ final class EchoSuppressor {
     static final double OVER = 3;
     /** Per-frame hold of each band's reference level: covers about 100 ms of wandering delay and reverb. */
     static final double HOLD = 0.8;
-    /** Learned coupling never exceeds this: the doorbell does not send your voice back much louder than you spoke. */
-    static final double MAX_COUPLING = 4;
+    /** Learned coupling never exceeds this. The doorbell's gain control can return a quiet voice louder than it was sent. */
+    static final double MAX_COUPLING = 16;
 
     final int size, hop;
     private final double[] window, cos, sin;
@@ -67,12 +67,12 @@ final class EchoSuppressor {
             // with a short decay rather than trusting one frame's alignment.
             echoSpread[k] = Math.max(refPower[k], echoSpread[k] * HOLD);
             double x = echoSpread[k];
-            if (x > 300.0 * size) { // Roughly RMS 25: you are actually talking.
+            if (x > 20.0 * size) { // Roughly RMS 6: you are talking, even quietly.
                 // Learn how strongly each band comes back against the held level the estimate uses. The held level
                 // outlasts the echo and your pauses, so low returns say little: follow the strong ones quickly and
                 // let it sink slowly. A return far above what was learned is the visitor talking, not echo.
                 double ratio = Math.min(MAX_COUPLING, y / x);
-                if (ratio > coupling[k]) { if (ratio < 4 * coupling[k]) coupling[k] += 0.1 * (ratio - coupling[k]); }
+                if (ratio > coupling[k]) { if (ratio < 8 * coupling[k]) coupling[k] += 0.1 * (ratio - coupling[k]); }
                 else coupling[k] += 0.01 * (ratio - coupling[k]);
             }
             double echo = coupling[k] * x;

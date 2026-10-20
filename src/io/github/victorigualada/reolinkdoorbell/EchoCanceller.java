@@ -30,7 +30,7 @@ final class EchoCanceller {
     static final int ENVELOPE_MS = 10, HISTORY_MS = 6000, MAX_DELAY_MS = 2000;
     static final double MIN_CORRELATION = 0.4, STEP = 0.4, REGULARIZATION = 1e3;
     /** Below this reference level (RMS, 16-bit) there is nothing to cancel and nothing to learn from. */
-    static final double SILENCE = 30;
+    static final double SILENCE = 10;
 
     final int rate, taps, block;
     // Reference ring: resampled sent audio, with the wall time (µs) of ring index 0's sample tracked as refStart.
