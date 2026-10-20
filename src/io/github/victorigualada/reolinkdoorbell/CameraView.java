@@ -141,7 +141,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private void showMessage(String text, boolean error) {
         if (disposed) return;
         statusError = error; status.setText(text); status.setTextColor(theme.color(error ? "error" : "onSurface")); status.setVisibility(VISIBLE);
-        if (!error) { removeCallbacks(hideStatus); postDelayed(hideStatus, 4000); }
+        if (!error) { removeCallbacks(hideStatus); postDelayed(hideStatus, settings.diagnostics ? 10000 : 4000); }
     }
     private void hideStatus() { if (!statusError) status.setVisibility(GONE); }
     private void message(String text, boolean error) { post(() -> showMessage(text, error)); }
@@ -193,7 +193,8 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         final long token = playbackCallbacks.next();
         StreamPlayer previous = player; player = null; if (previous != null) previous.close();
         StreamPlayer next = new StreamPlayer(settings, new Surface(st), new StreamPlayer.Listener() {
-            public void status(String text, boolean error) { postPlayback(token, () -> showMessage(text, error)); }
+            // Connection, codec and timing notes are diagnostics; errors always show.
+            public void status(String text, boolean error) { if (error || settings.diagnostics) postPlayback(token, () -> showMessage(text, error)); }
             public void size(int width, int height) { postPlayback(token, () -> { videoWidth = width; videoHeight = height; layoutImage(); }); }
             public void failed() { postPlayback(token, () -> { playbackCallbacks.next(); if (player != null) { player.close(); player = null; } music.close(); }); }
         });

@@ -50,7 +50,7 @@ public final class CoreTest {
         fails(() -> new Settings(Collections.emptyMap()).streamUrl(), "Set the doorbell", "Unconfigured settings cannot build a URL");
         check(new Settings(Collections.emptyMap()).autoOpen && new Settings(Collections.emptyMap()).wakeScreen, "Ring opens and wakes by default");
         Settings defaults = new Settings(Collections.emptyMap());
-        check(defaults.talkEnabled && defaults.talkSeconds == 120 && defaults.controls.equals("Bottom"), "Talk on, 2 minute limit, call bar at the bottom by default");
+        check(!defaults.diagnostics && defaults.talkEnabled && defaults.talkSeconds == 120 && defaults.controls.equals("Bottom"), "Talk on, 2 minute limit, call bar at the bottom by default");
         Map<String, Object> limit = base(); limit.put("talkSeconds", 5);
         fails(() -> new Settings(limit), "Out-of-range", "Talk limit is bounded");
     }
