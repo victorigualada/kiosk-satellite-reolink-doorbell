@@ -31,7 +31,7 @@ public final class CoreTest {
     static void settings() {
         Settings s = new Settings(base());
         check(s.streamUrl().toString().equals("rtsp://192.168.1.50:554/Preview_01_sub"), "Default stream is the sub stream on channel 1");
-        Map<String, Object> m = base(); m.put("stream", "main"); m.put("channel", 2); m.put("rtspPort", 8554);
+        Map<String, Object> m = base(); m.put("stream", "main"); m.put("channel", 2); m.put("rtspPort", "8554");
         check(new Settings(m).streamUrl().toString().equals("rtsp://192.168.1.50:8554/Preview_03_main"), "Channel and port shape the RTSP URL");
         check(s.apiUrl("cmd=Login").toString().equals("http://192.168.1.50:80/cgi-bin/api.cgi?cmd=Login"), "HTTP API URL");
         m = base(); m.put("host", "fe80::1"); check(new Settings(m).streamUrl().getHost().equals("[fe80::1]"), "IPv6 hosts are bracketed");
@@ -43,6 +43,10 @@ public final class CoreTest {
         fails(() -> new Settings(lock), "Choose a lock", "Lock entity must be a lock");
         Map<String, Object> range = base(); range.put("channel", 16);
         fails(() -> new Settings(range), "Out-of-range", "Channel is bounded");
+        Map<String, Object> port = base(); port.put("rtspPort", "70000");
+        fails(() -> new Settings(port), "Out-of-range", "Port text is bounded");
+        Map<String, Object> blank = base(); blank.put("httpPort", " ");
+        check(new Settings(blank).httpPort == 80, "Blank port falls back to the default");
         fails(() -> new Settings(Collections.emptyMap()).streamUrl(), "Set the doorbell", "Unconfigured settings cannot build a URL");
         check(new Settings(Collections.emptyMap()).autoOpen && new Settings(Collections.emptyMap()).wakeScreen, "Ring opens and wakes by default");
     }

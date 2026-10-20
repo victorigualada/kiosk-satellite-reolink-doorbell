@@ -45,11 +45,18 @@ fields = {s['key']: s for s in manifest['settings']}
 assert fields['password']['type'] == 'secret' and fields['password']['default'] == ''
 assert fields['visitorEntity']['type'] == 'entity' and fields['visitorEntity']['domain'] == 'binary_sensor'
 assert fields['lockEntity']['type'] == 'entity' and fields['lockEntity']['domain'] == 'lock'
+assert fields['rtspPort']['type'] == 'string' and fields['rtspPort']['default'] == '554'
 assert fields['stream']['default'] == 'sub' and fields['stream']['options'] == ['sub', 'main']
 for field in manifest['settings']:
     if field['type'] == 'number':
         assert field['min'] <= field['default'] <= field['max'], field['key']
         assert (field['default'] - field['min']) % field['step'] == 0, field['key']
+        # Kiosk Satellite rejects a number setting with more than 10000 steps.
+        assert 1 <= (field['max'] - field['min']) / field['step'] <= 10000, field['key']
+# Text limits Kiosk Satellite enforces at install time.
+assert len(manifest['description']) <= 1000
+for field in manifest['settings'] + manifest['buttons']:
+    assert 0 < len(field['title']) <= 80 and len(field.get('description', '')) <= 400, field.get('key', field.get('id'))
 # Conditions must reference an earlier non-secret field.
 earlier = {}
 for field in manifest['settings']:

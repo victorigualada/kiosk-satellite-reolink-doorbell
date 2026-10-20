@@ -18,8 +18,8 @@ final class Settings {
         password = text(m, "password");
         for (String value : new String[] {username, password})
             if (value.contains("\r") || value.contains("\n")) throw new IllegalArgumentException("Invalid username or password format");
-        rtspPort = number(m, "rtspPort", 554, 1, 65535);
-        httpPort = number(m, "httpPort", 80, 1, 65535);
+        rtspPort = port(m, "rtspPort", 554);
+        httpPort = port(m, "httpPort", 80);
         https = flag(m, "https", false);
         channel = number(m, "channel", 0, 0, 15);
         stream = choice(m, "stream", "sub", "sub", "main");
@@ -68,6 +68,16 @@ final class Settings {
         Object v = m.get(key); double n = v instanceof Number ? ((Number) v).doubleValue() : d;
         if (!Double.isFinite(n) || n < min || n > max) throw new IllegalArgumentException("Out-of-range setting: " + key);
         return (int) Math.round(n);
+    }
+    /** Ports are text settings: Kiosk Satellite caps number settings at 10000 steps. */
+    private static int port(Map<String, Object> m, String key, int d) {
+        Object v = m.get(key);
+        if (v instanceof Number) return number(m, key, d, 1, 65535);
+        String text = v instanceof String ? ((String) v).trim() : "";
+        if (text.isEmpty()) return d;
+        if (!text.matches("[0-9]{1,5}") || Integer.parseInt(text) < 1 || Integer.parseInt(text) > 65535)
+            throw new IllegalArgumentException("Out-of-range setting: " + key + " must be a port from 1 to 65535");
+        return Integer.parseInt(text);
     }
     private static String choice(Map<String, Object> m, String key, String d, String... options) {
         String v = text(m, key); if (v.isEmpty()) return d;
