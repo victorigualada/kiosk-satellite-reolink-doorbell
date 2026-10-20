@@ -19,12 +19,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class Talkback implements AutoCloseable {
     interface Listener {
         void status(String text, boolean error); void microphoneActive(); void finished();
-        default void speaking(boolean speaking) {}
-        /** The level the tablet's speaker is playing now, as PCM RMS. */
-        default double far() { return 0; }
+        /** Each microphone chunk as sent: {@code n} samples at {@code rate}, the last captured at {@code endMicros}. */
+        default void sent(short[] pcm, int n, int rate, long endMicros) {}
     }
-    /** How long speech holds after the last loud chunk: long enough to cover the doorbell sending the voice back. */
-    static final long HANGOVER_MS = 1200;
     static final String BACKCHANNEL = "Require: www.onvif.org/ver20/backchannel\r\n";
     static final String NO_BACKCHANNEL = "This doorbell does not offer two-way audio over RTSP; check its firmware";
     private final Context context; private final Settings settings; private final Listener listener;
@@ -36,7 +33,7 @@ final class Talkback implements AutoCloseable {
     private volatile Exception failure;
     private MediaCodec encoder; private boolean encoderStarted;
     private final java.util.List<android.media.audiofx.AudioEffect> effects = new java.util.ArrayList<>();
-    private final VoiceActivity voice = new VoiceActivity(HANGOVER_MS);
+    private short[] samples = new short[0];
     Talkback(Context context, Settings settings, Listener listener) {
         this.context = context; this.settings = settings; this.listener = listener;
         deadline = System.nanoTime() + settings.talkSeconds * 1_000_000_000L;
@@ -96,7 +93,7 @@ final class Talkback implements AutoCloseable {
                     int n = capture.read(pcm, 0, pcm.length);
                     if (n < 0) throw new IOException("Microphone capture failed; talk stopped");
                     if (n < 2) continue;
-                    heard(pcm, n);
+                    heard(pcm, n, track.rate);
                     byte[] payload = G711.encode(pcm, n, "PCMA".equals(track.codec));
                     sequence = send(client, channel, Protocol.rtp(payload, sequence, samples, ssrc, track.payload), sequence);
                     samples += payload.length;
@@ -108,7 +105,7 @@ final class Talkback implements AutoCloseable {
                     if (buffer == null) throw new IOException("Encoder input unavailable");
                     int n = capture.read(pcm, 0, Math.min(pcm.length, buffer.capacity()) & ~1);
                     if (n < 0) throw new IOException("Microphone capture failed; talk stopped");
-                    heard(pcm, n);
+                    heard(pcm, n, track.rate);
                     buffer.clear(); buffer.put(pcm, 0, n);
                     encoder.queueInputBuffer(index, 0, n, samples * 1000000L / track.rate, 0); samples += n / 2;
                 }
@@ -145,14 +142,15 @@ final class Talkback implements AutoCloseable {
                 try { if (encoderStarted) encoder.stop(); } catch (RuntimeException ignored) {}
                 try { encoder.release(); } catch (RuntimeException ignored) {} encoder = null;
             }
-            if (voice.speaking()) listener.speaking(false);
             listener.finished();
         }
     }
-    /** Tracks speech; in Strong mode, sends silence while the person is not speaking, so the doorbell never hears itself. */
-    private void heard(byte[] pcm, int n) {
-        if (voice.update(pcm, n, System.nanoTime() / 1_000_000, listener.far())) listener.speaking(voice.speaking());
-        if ("Strong".equals(settings.echo) && !voice.speaking()) java.util.Arrays.fill(pcm, 0, n, (byte) 0);
+    /** Hands the chunk about to be sent to the echo canceller, stamped with when it was captured. */
+    private void heard(byte[] pcm, int n, int rate) {
+        long now = System.nanoTime() / 1000;
+        int count = n / 2; if (samples.length < count) samples = new short[count];
+        for (int i = 0; i < count; i++) samples[i] = (short) ((pcm[2 * i] & 255) | (pcm[2 * i + 1] << 8));
+        listener.sent(samples, count, rate, now);
     }
     /**
      * Android's echo canceller, noise suppressor and gain control on the microphone, where the tablet has them.

@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); voice();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); echo();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -224,22 +224,88 @@ public final class CoreTest {
         check(units.size() == 2 && Arrays.equals(units.get(0), patched) && units.get(1)[0] == 0x65, "Access unit carries the patched SPS and the slice untouched");
         check(SpsPatch.accessUnit(new byte[] {0, 0, 0, 1, 0x41, 9}).length == 6, "Units without an SPS pass through");
     }
-    static byte[] tone(int amplitude, int samples) {
-        byte[] b = new byte[samples * 2];
-        for (int i = 0; i < samples; i++) { int v = i % 2 == 0 ? amplitude : -amplitude; b[2 * i] = (byte) v; b[2 * i + 1] = (byte) (v >> 8); }
-        return b;
+    /** Speech-like test signal: voiced, band-limited noise in syllables of 100-350 ms with pauses between. */
+    static double[] speech(long seed, int n, int rate) {
+        Random r = new Random(seed); double[] s = new double[n];
+        double noise = 0, voice = 0, amplitude = 0; int left = 0; boolean on = false;
+        for (int i = 0; i < n; i++) {
+            if (left-- <= 0) { on = !on; left = (int) (rate * (on ? 0.1 + 0.25 * r.nextDouble() : 0.05 + 0.3 * r.nextDouble())); amplitude = 3000 * (0.4 + 0.6 * r.nextDouble()); }
+            noise = 0.7 * noise + 0.3 * r.nextGaussian();
+            voice = 0.9 * voice + 0.1 * Math.sin(i * 2 * Math.PI * (150 + 50 * Math.sin(i / 3000.0)) / rate);
+            s[i] = on ? amplitude * (noise + 2 * voice) : 0;
+        }
+        return s;
     }
-    static void voice() {
-        check(Math.abs(VoiceActivity.level(tone(1000, 160), 320) - 1000) < 1, "Level is the RMS of the samples");
-        VoiceActivity v = new VoiceActivity(400);
-        byte[] quiet = tone(100, 160), loud = tone(3000, 160);
-        check(!v.update(quiet, 320, 0) && !v.speaking(), "Room noise is not speech");
-        check(v.update(loud, 320, 20) && v.speaking(), "Speech starts ducking");
-        check(!v.update(quiet, 320, 300) && v.speaking(), "Short pauses keep the duck");
-        check(v.update(quiet, 320, 500) && !v.speaking(), "Ducking ends after the hangover");
-        VoiceActivity echo = new VoiceActivity(400);
-        check(!echo.update(loud, 320, 0, 6000) && !echo.speaking(), "The doorbell heard through the speaker is not the person speaking");
-        check(echo.update(loud, 320, 20, 1000) && echo.speaking(), "Speech louder than the speaker counts");
-        check(new Settings(Collections.emptyMap()).echo.equals("Normal"), "Echo reduction defaults to Normal");
+    /**
+     * Runs a 12 s call: you talk throughout, the doorbell returns your voice {@code delayMs} later through a short
+     * filter with {@code gain} and codec-like distortion. With {@code visitor} 1 the visitor talks over you from 8 to
+     * 11 s; with 2 you stop at 8 s and the visitor answers from 8.5 s. Sent audio
+     * is 20 ms microphone chunks; received audio is 1024-sample decoder chunks arriving with up to 30 ms jitter.
+     * With {@code wanderMs}, the echo delay drifts back and forth by that much, as a doorbell's playout buffer might.
+     * Returns {delay estimate ms, echo reduction dB over 4-8 s, visitor SNR dB before, after, over 8.5-11 s (9.5-11 s when answering)}.
+     */
+    static double[] call(int rate, int delayMs, double gain, double distortion, int visitor) { return call(rate, delayMs, gain, distortion, visitor, 0); }
+    static double[] call(int rate, int delayMs, double gain, double distortion, int visitor, double wanderMs) {
+        int n = rate * 12, delay = delayMs * rate / 1000;
+        double[] you = speech(7, n, rate), them = speech(9, n, rate), in = new double[n], out = new double[n];
+        if (visitor == 2) Arrays.fill(you, 8 * rate, n, 0);
+        double[] path = {0.5, 0.2, -0.1, 0.05, 0.02};
+        Random r = new Random(3);
+        for (int i = 0; i < n; i++) {
+            double e = 0; for (int k = 0; k < path.length; k++) { int j = i - delay - k * 3 - (int) (wanderMs * rate / 1000 * Math.sin(i * 0.7 / rate)); if (j >= 0) e += path[k] * you[j]; }
+            e *= gain; e += distortion * Math.abs(e) * r.nextGaussian();
+            in[i] = e + (visitor > 0 && i > 8.5 * rate && i < 11 * rate ? them[i] : 0) + 20 * r.nextGaussian();
+        }
+        EchoCanceller c = new EchoCanceller(rate);
+        int latency = new EchoSuppressor(rate).size - 1; // Output lags input by one suppressor frame once it runs.
+        int chunkOut = rate / 50, chunkIn = 1024, sent = 0, got = 0; long t0 = 1_000_000_000L;
+        while (got + chunkIn <= n) {
+            long sendEnd = t0 + (long) ((sent + chunkOut) * 1e6 / rate);
+            long arrive = t0 + (long) (got * 1e6 / rate) + r.nextInt(30000);
+            if (sent + chunkOut <= n && sendEnd <= arrive) {
+                short[] p = new short[chunkOut]; for (int i = 0; i < chunkOut; i++) p[i] = (short) you[sent + i];
+                c.reference(p, chunkOut, rate, sendEnd); sent += chunkOut;
+            } else {
+                short[] d = new short[chunkIn]; for (int i = 0; i < chunkIn; i++) d[i] = (short) Math.max(-32768, Math.min(32767, in[got + i]));
+                c.process(d, chunkIn, arrive);
+                for (int i = 0; i < chunkIn; i++) if (got + i >= latency) out[got + i - latency] = d[i];
+                got += chunkIn;
+            }
+        }
+        double before = 0, after = 0, voice = 0, mixed = 0, left = 0;
+        for (int i = 4 * rate; i < 8 * rate; i++) { before += in[i] * in[i]; after += out[i] * out[i]; }
+        for (int i = (visitor == 2 ? 19 : 17) * rate / 2; i < 11 * rate; i++) { // Once your echo has died away.
+            voice += them[i] * them[i]; mixed += (in[i] - them[i]) * (in[i] - them[i]); left += (out[i] - them[i]) * (out[i] - them[i]);
+        }
+        return new double[] {c.delayMillis(), 10 * Math.log10(before / after), 10 * Math.log10(voice / mixed), 10 * Math.log10(voice / left)};
+    }
+    static void echo() {
+        check(new Settings(Collections.emptyMap()).echoCanceller, "Echo cancelling is on by default");
+        double[] a = {1, 2, 3, 4, 5, 0, 0}, b = {0, 0, 2, 4, 6, 8, 10};
+        check(Math.abs(EchoCanceller.correlation(a, 0, b, 2, 5) - 1) < 1e-9 && EchoCanceller.correlation(a, 0, b, 0, 5) < 1, "Envelope correlation finds the lag");
+        double[] wide = call(16000, 480, 1, 0, 0);
+        check(Math.abs(wide[0] - 480) <= 30, "Echo delay found at 16 kHz (" + wide[0] + " ms)");
+        check(wide[1] > 15, "Echo cut by more than 15 dB at 16 kHz (" + Math.round(wide[1]) + " dB)");
+        double[] narrow = call(8000, 300, 1, 0, 0);
+        check(Math.abs(narrow[0] - 300) <= 30 && narrow[1] > 15, "Echo cut at 8 kHz G.711 rate (" + narrow[0] + " ms, " + Math.round(narrow[1]) + " dB)");
+        double[] loud = call(16000, 900, 2, 0.1, 2);
+        check(loud[1] > 12, "Loud distorted echo still cut (" + Math.round(loud[1]) + " dB)");
+        check(loud[3] > 20, "The visitor answering after you stop comes through clean (" + Math.round(loud[2]) + " → " + Math.round(loud[3]) + " dB)");
+        double[] both = call(16000, 480, 1, 0.05, 1);
+        // Talking at once, the bands your voice occupies are turned down, the visitor's share of them included: the
+        // price of cutting a quiet voice's echo. They must still come through, not be gated.
+        check(both[3] > both[2] - 4, "Talking at once, the visitor still comes through (" + Math.round(both[2]) + " → " + Math.round(both[3]) + " dB)");
+        double[] wandering = call(16000, 360, 1, 0.1, 0, 5);
+        check(wandering[1] > 10, "Echo with a wandering delay still cut by the suppressor (" + Math.round(wandering[1]) + " dB)");
+        EchoSuppressor quiet = new EchoSuppressor(16000);
+        short[] speech = new short[16000]; double[] none = new double[speech.length];
+        for (int i = 0; i < speech.length; i++) speech[i] = (short) (2000 * Math.sin(i * 0.05) + 500 * Math.sin(i * 0.31));
+        short[] passed = speech.clone(); quiet.process(passed, none, passed.length);
+        double error = 0; for (int i = 4000; i < 16000; i++) error = Math.max(error, Math.abs(passed[i] - speech[i - quiet.size + 1]));
+        check(error <= 2, "With you silent the suppressor passes the visitor untouched, one frame late (" + error + ")");
+        EchoCanceller idle = new EchoCanceller(16000);
+        short[] visitorOnly = new short[1024]; for (int i = 0; i < visitorOnly.length; i++) visitorOnly[i] = (short) (i * 37 % 2000 - 1000);
+        short[] copy = visitorOnly.clone(); idle.process(copy, copy.length, 1_000_000);
+        check(Arrays.equals(copy, visitorOnly) && idle.delayMillis() == -1, "Without your voice nothing is changed");
     }
 }

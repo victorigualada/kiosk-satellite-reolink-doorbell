@@ -62,17 +62,15 @@ final class StreamPlayer implements AutoCloseable {
     }
     void start() { Thread t = new Thread(this::run, "reolink-stream"); t.setDaemon(true); t.start(); }
     void setMuted(boolean value) { muted = value; }
-    private volatile boolean talking, ducked;
+    private volatile boolean talking;
+    private volatile EchoCanceller canceller;
     /**
      * While talking, play the doorbell as a voice call so Android's echo canceller hears it as the reference, and
-     * turn it down while the person at the kiosk speaks.
+     * take your own voice out of what the doorbell sends back.
      */
-    void setTalking(boolean value) { talking = value; if (!value) ducked = false; }
-    void setDucked(boolean value) { ducked = value; }
-    private volatile double farLevel; private volatile long farAt;
-    /** RMS of what the speaker played in the last 200 ms, after volume; 0 when silent. */
-    double farLevel() { return System.nanoTime() - farAt < 200_000_000L ? farLevel : 0; }
-    private float volume() { return muted ? 0 : ducked ? ("Strong".equals(settings.echo) ? 0 : 0.15f) : 1; }
+    void setTalking(boolean value) { talking = value; if (!value) canceller = null; }
+    /** Microphone audio as it was sent to the doorbell, for the echo canceller; see {@link EchoCanceller#reference}. */
+    void sent(short[] pcm, int n, int rate, long endMicros) { EchoCanceller c = canceller; if (c != null) c.reference(pcm, n, rate, endMicros); }
     private void run() {
         boolean connecting = true;
         try {
@@ -195,11 +193,6 @@ final class StreamPlayer implements AutoCloseable {
             + ", first video at " + seconds(packet - opened) + ", keyframe at " + seconds(key - opened)
             + ", viewer ready at " + seconds(ready - opened) + ", decoded " + seconds(lastVideoFrame - Math.max(key, ready)) + " after both", false);
     }
-    private static double rms(ByteBuffer pcm) {
-        int count = pcm.remaining() / 2; if (count == 0) return 0;
-        double sum = 0; for (int i = 0; i < count; i++) { int s = pcm.getShort(); sum += (double) s * s; }
-        return Math.sqrt(sum / count);
-    }
     static String seconds(long nanos) { return String.format(Locale.ROOT, "%.1f s", Math.max(0, nanos) / 1e9); }
     public void close() {
         closed.set(true);
@@ -209,6 +202,7 @@ final class StreamPlayer implements AutoCloseable {
         final Sdp.Track track; final boolean video;
         MediaCodec codec; AudioTrack audio; VideoDecoder videoDecoder;
         int audioRate, audioChannels; boolean audioCall;
+        short[] samples = new short[0]; long echoNote;
         long epoch = -1; boolean started, attached;
         Decoder(Sdp.Track track, boolean video) throws Exception {
             this.track = track; this.video = video;
@@ -269,15 +263,37 @@ final class StreamPlayer implements AutoCloseable {
                         if (video) lastVideoFrame = System.nanoTime();
                         else if (audio != null && info.size > 0) {
                             if (audioCall != talking) openTrack();
-                            float volume = volume(); audio.setVolume(volume);
+                            audio.setVolume(muted ? 0 : 1);
                             ByteBuffer pcm = codec.getOutputBuffer(index);
                             if (pcm != null) {
                                 pcm.position(info.offset); pcm.limit(info.offset + info.size);
-                                if (talking) { farLevel = rms(pcm.duplicate().order(java.nio.ByteOrder.LITTLE_ENDIAN)) * volume; farAt = System.nanoTime(); } audio.write(pcm, info.size, AudioTrack.WRITE_NON_BLOCKING); }
+                                EchoCanceller c = echoCanceller();
+                                if (c == null) audio.write(pcm, info.size, AudioTrack.WRITE_NON_BLOCKING);
+                                else {
+                                    int count = info.size / 2;
+                                    if (samples.length < count) samples = new short[count];
+                                    pcm.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples, 0, count);
+                                    c.process(samples, count, System.nanoTime() / 1000);
+                                    audio.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
+                                    if (System.nanoTime() - echoNote > 5_000_000_000L) {
+                                        echoNote = System.nanoTime();
+                                        long delay = c.delayMillis();
+                                        listener().status(delay < 0 ? "Echo canceller: listening for your voice coming back — " + c.search()
+                                            : String.format(Locale.ROOT, "Echo canceller: your voice comes back after %d ms, cancelling %.0f dB (filter %.0f dB) — %s", delay, c.cancellingDb(), c.filterDb(), c.search()), false);
+                                    }
+                                }
+                            }
                         }
                     } finally { codec.releaseOutputBuffer(index, video && !closed.get()); }
                 }
             }
+        }
+        /** The canceller while talking with mono audio, made for this stream's rate on first use. */
+        EchoCanceller echoCanceller() {
+            if (!talking || !settings.echoCanceller || audioChannels != 1) return null;
+            EchoCanceller c = canceller;
+            if (c == null || c.rate != audioRate) { canceller = c = new EchoCanceller(audioRate); echoNote = System.nanoTime(); }
+            return c;
         }
         /** Media while listening; a voice call while talking, so the echo canceller takes it as its reference. */
         void openTrack() throws IOException {

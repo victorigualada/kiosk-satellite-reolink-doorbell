@@ -9,6 +9,7 @@ A [Kiosk Satellite](https://kiosksatellite.com) plugin that shows a wired or PoE
 - Live video (H.264 or H.265) and audio (AAC) from the doorbell's own RTSP stream, with Digest authentication.
 - Call-style buttons: a **green phone** opens the tablet's microphone and talks through the doorbell, a **blue door** in the middle opens the Home Assistant lock (only when one is set), and a **red phone** hangs up and closes the viewer.
 - Two-way audio over the doorbell's ONVIF RTSP backchannel (G.711 or AAC), on a second RTSP connection. Speech is never stored.
+- Echo cancelling while you talk: the doorbell sends your own voice back, so the plugin learns that echo from what it sent (two-path NLMS adaptive filter) and subtracts it, keeping the visitor audible when you both talk at once.
 - Opens full screen when Home Assistant's Reolink integration reports a visitor (the doorbell button), waking the screen and covering the screensaver.
 - Fires a **Doorbell rang** gesture trigger, so you can also run anything the Gestures page offers on a ring.
 - **Test connection** button that logs in to the doorbell's HTTP API and shows its model and firmware.

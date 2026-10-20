@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "reolink-doorbell",
   "name": "Reolink Doorbell",
-  "version": "0.2.16",
+  "version": "0.3.4",
   "minAndroidSdk": 26,
   "entryClass": "io.github.victorigualada.reolinkdoorbell.ReolinkPlugin",
   "description": "Live video and two-way audio with a wired or PoE Reolink doorbell, straight from the doorbell over RTSP. Opens on its own when the doorbell rings, using Home Assistant's visitor sensor, and can open the door through a Home Assistant lock. No go2rtc or restreamer needed.",
@@ -43,7 +43,7 @@
     {"key": "autoClose", "type": "select", "title": "Auto-close after inactivity", "default": "1 minute", "options": ["Off", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes"], "group": "Display"},
     {"key": "startMuted", "type": "boolean", "title": "Start with audio muted", "default": false, "group": "Audio"},
     {"key": "talkEnabled", "type": "boolean", "title": "Two-way audio", "default": true, "group": "Audio", "description": "The green phone opens the tablet's microphone and sends it to the doorbell over its ONVIF RTSP backchannel. Kiosk Satellite needs microphone permission."},
-    {"key": "echo", "type": "select", "title": "Echo reduction while talking", "default": "Normal", "options": ["Normal", "Strong", "Off"], "group": "Audio", "visibleWhen": {"key": "talkEnabled", "equals": true}, "description": "Normal turns the doorbell down while you speak. Strong mutes it while you speak and sends silence while you don't, like an automatic walkie-talkie: no echo, but you can't both talk at once."},
+    {"key": "echoCanceller", "type": "boolean", "title": "Cancel your voice coming back", "default": true, "group": "Audio", "visibleWhen": {"key": "talkEnabled", "equals": true}, "description": "The doorbell sends your own voice back while you talk. This learns that echo from what the tablet sent and subtracts it, so you still hear the visitor when you both talk at once."},
     {"key": "talkSeconds", "type": "number", "title": "Talk time limit (seconds)", "default": 120, "min": 15, "max": 600, "step": 15, "group": "Audio", "visibleWhen": {"key": "talkEnabled", "equals": true}},
     {"key": "lockEntity", "type": "entity", "domain": "lock", "title": "Door lock (optional)", "default": "", "group": "Home Assistant", "description": "Shows a blue door button between the call buttons. A tap unlocks the door, or locks it again when it is open, at once and without confirmation."}
   ]
