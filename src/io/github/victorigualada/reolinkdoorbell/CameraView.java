@@ -32,6 +32,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private final MusicFocus music;
     private boolean statusError, audioInterrupted;
     private Talkback talk;
+    private volatile Talkback ready; // Set up ahead while the viewer is open, so the green phone opens the microphone fast.
     private boolean talking;
     private final Application application;
     private volatile StreamPlayer player;
@@ -170,17 +171,34 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         if (disposed || stopping) return;
         if (talk != null) { stopTalk(); return; }
         if (!settings.talkEnabled) { showMessage("Two-way audio is turned off in plugin settings", false); return; }
+        Talkback next = ready; ready = null;
+        if (next != null && !next.usable()) { next.close(); next = null; }
+        if (next == null) next = newTalk();
+        // Answering is a conversation: hear the visitor too.
+        if (listeningMuted || audioInterrupted) { audioInterrupted = false; listeningMuted = false; styleListen(); applyMute(); }
+        talk = next; styleTalk(); next.start();
+    }
+    private Talkback newTalk() {
         final Talkback[] owner = new Talkback[1];
-        Talkback next = new Talkback(getContext(), settings, new Talkback.Listener() {
+        owner[0] = new Talkback(getContext(), settings, new Talkback.Listener() {
             public void status(String text, boolean error) { post(() -> { if (talk == owner[0]) showMessage(text, error); }); }
             public void microphoneActive() { post(() -> { if (talk == owner[0] && !disposed) { talking = true; styleTalk(); applyMute(); } }); }
             public void speaking(boolean speaking) { StreamPlayer p = player; if (p != null && !"Off".equals(settings.echo)) p.setDucked(speaking); }
             public double far() { StreamPlayer p = player; return p == null ? 0 : p.farLevel(); }
-            public void finished() { post(() -> { if (talk == owner[0]) { talk = null; talking = false; if (!disposed) { styleTalk(); applyMute(); } } }); }
+            public void finished() {
+                post(() -> {
+                    if (talk != owner[0]) return;
+                    talk = null; talking = false;
+                    if (!disposed) { styleTalk(); applyMute(); postDelayed(CameraView.this::prepareTalk, 1000); }
+                });
+            }
         });
-        // Answering is a conversation: hear the visitor too.
-        if (listeningMuted || audioInterrupted) { audioInterrupted = false; listeningMuted = false; styleListen(); applyMute(); }
-        owner[0] = next; talk = next; styleTalk(); next.start();
+        return owner[0];
+    }
+    /** Connects and sets up the next talk session in the background; it stays silent until the green phone. */
+    private void prepareTalk() {
+        if (!settings.talkEnabled || disposed || stopping || talk != null || ready != null) return;
+        ready = newTalk(); ready.prepare();
     }
     private void stopTalk() {
         Talkback current = talk; talk = null; talking = false;
@@ -220,6 +238,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
             next = new StreamPlayer(settings, surface, events); next.start();
         }
         player = next; if (stopping) next.close(); applyMute(); layoutImage();
+        prepareTalk();
     }
     private void postPlayback(long token, Runnable action) { post(() -> { if (!disposed && !stopping && playbackCallbacks.current(token)) action.run(); }); }
     public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {}
@@ -244,6 +263,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         playbackCallbacks.next();
         music.close();
         Talkback t = talk; if (t != null) t.close();
+        Talkback r = ready; ready = null; if (r != null) r.close();
         StreamPlayer e = early; early = null; if (e != null) e.close();
         StreamPlayer p = player; if (p != null) p.close();
     }

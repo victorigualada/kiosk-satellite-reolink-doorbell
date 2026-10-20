@@ -30,7 +30,11 @@ final class Talkback implements AutoCloseable {
     private final Context context; private final Settings settings; private final Listener listener;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object gate = new Object();
-    private final long deadline;
+    private volatile long deadline = Long.MAX_VALUE;
+    // Prepared ahead: the session is set up while the viewer is open, and waits for the green phone to PLAY.
+    private final Object goLock = new Object();
+    private volatile boolean go, started, ended;
+    private volatile long tappedAt;
     private volatile RtspClient rtsp;
     private volatile AudioRecord recorder;
     private volatile Exception failure;
@@ -39,15 +43,29 @@ final class Talkback implements AutoCloseable {
     private final VoiceActivity voice = new VoiceActivity(HANGOVER_MS);
     Talkback(Context context, Settings settings, Listener listener) {
         this.context = context; this.settings = settings; this.listener = listener;
-        deadline = System.nanoTime() + settings.talkSeconds * 1_000_000_000L;
     }
-    void start() { Thread t = new Thread(this::run, "reolink-talk"); t.setDaemon(true); t.start(); }
+    /** Connects and sets up the talk channel now, quietly, so {@link #start} only has to play and open the microphone. */
+    void prepare() { launch(); }
+    /** Starts talking, on the prepared session if there is one. */
+    void start() {
+        synchronized (goLock) { tappedAt = System.nanoTime(); deadline = tappedAt + settings.talkSeconds * 1_000_000_000L; go = true; goLock.notifyAll(); }
+        launch();
+    }
+    /** Whether a prepared session can still be started: set up, or still setting up, and not failed. */
+    boolean usable() { return !ended && !closed.get() && failure == null; }
+    private synchronized void launch() {
+        if (started) return;
+        started = true; Thread t = new Thread(this::run, "reolink-talk"); t.setDaemon(true); t.start();
+    }
     private boolean active() { return !closed.get() && failure == null && System.nanoTime() < deadline; }
+    /** Before the green phone is pressed, the session stays silent: nothing to report yet. */
+    private void status(String text, boolean error) { if (go) listener.status(text, error); }
     private void run() {
         try {
             if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 throw new SecurityException();
-            listener.status("Connecting the microphone to the doorbell", false);
+            status("Connecting the microphone to the doorbell", false);
+            long begun = System.nanoTime();
             URI url = settings.streamUrl();
             RtspClient client = new RtspClient(settings); rtsp = client;
             if (!active()) return;
@@ -64,14 +82,25 @@ final class Talkback implements AutoCloseable {
             Protocol.Message setup = client.request("SETUP", Sdp.control(base, track.control), "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n" + BACKCHANNEL);
             int channel = interleavedChannel(setup.headers.getOrDefault("transport", ""));
             client.session(setup);
-            client.request("PLAY", base, "Range: npt=0.000-\r\n" + BACKCHANNEL);
-            if (!active()) return;
-            Thread reader = new Thread(() -> drain(client), "reolink-talk-reader"); reader.setDaemon(true); reader.start();
+            // The encoder is ready ahead too; only the microphone waits for the tap, so it is never open unasked.
             boolean aac = "MPEG4-GENERIC".equals(track.codec);
             if (track.channels != 1) throw new IOException("Only mono talk audio is supported");
             if (aac) startEncoder(track.rate);
             int minimum = AudioRecord.getMinBufferSize(track.rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
             if (minimum <= 0) throw new IOException("Microphone does not support the doorbell's sample rate");
+            long ready = System.nanoTime();
+            // Prepared: hold the set-up session open until the green phone, with a keepalive the doorbell answers.
+            long keepaliveAt = System.nanoTime();
+            while (!go && active()) {
+                synchronized (goLock) { if (!go) goLock.wait(1000); }
+                if (!go && System.nanoTime() - keepaliveAt > 10_000_000_000L) { client.exchange("OPTIONS", base, ""); keepaliveAt = System.nanoTime(); }
+            }
+            if (!active()) return;
+            long from = Math.max(tappedAt, ready);
+            client.request("PLAY", base, "Range: npt=0.000-\r\n" + BACKCHANNEL);
+            long playing = System.nanoTime();
+            if (!active()) return;
+            Thread reader = new Thread(() -> drain(client), "reolink-talk-reader"); reader.setDaemon(true); reader.start();
             AudioRecord capture = new AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setSampleRate(track.rate).build())
                 .setBufferSizeInBytes(Math.max(minimum * 2, track.rate / 5)).build();
@@ -84,7 +113,12 @@ final class Talkback implements AutoCloseable {
             if (capture.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) throw new IOException("Microphone is unavailable or in use");
             String cancelling = attachEffects(capture.getAudioSessionId());
             listener.microphoneActive();
+            long open = System.nanoTime();
             listener.status("Talking — " + (aac ? "AAC" : track.codec) + ", echo cancelling " + cancelling + " — tap the green phone to stop", false);
+            // Where the wait after the tap went; a prepared session skips the connection and setup.
+            if (settings.diagnostics) listener.status("Microphone open " + StreamPlayer.seconds(open - tappedAt) + " after the tap: "
+                + (ready > tappedAt ? "connection and setup " + StreamPlayer.seconds(ready - begun) + ", " : "prepared ahead, ")
+                + "PLAY " + StreamPlayer.seconds(playing - from) + ", microphone " + StreamPlayer.seconds(open - playing), false);
             SecureRandom random = new SecureRandom();
             int sequence = random.nextInt(65536), ssrc = random.nextInt();
             long samples = 0, keepalive = System.nanoTime();
@@ -132,7 +166,7 @@ final class Talkback implements AutoCloseable {
             if (!closed.get()) listener.status("Talk time limit reached", false);
         } catch (Exception e) {
             Exception cause = failure != null ? failure : e;
-            if (!closed.get()) listener.status(Failures.describe(cause, "Two-way audio failed; check the doorbell firmware and microphone permission"), true);
+            if (!closed.get()) { if (failure == null) failure = e; status(Failures.describe(cause, "Two-way audio failed; check the doorbell firmware and microphone permission"), true); }
         } finally {
             close();
             synchronized (gate) {
@@ -146,7 +180,8 @@ final class Talkback implements AutoCloseable {
                 try { encoder.release(); } catch (RuntimeException ignored) {} encoder = null;
             }
             if (voice.speaking()) listener.speaking(false);
-            listener.finished();
+            ended = true;
+            if (go) listener.finished();
         }
     }
     /** Tracks speech; in Strong mode, sends silence while the person is not speaking, so the doorbell never hears itself. */
