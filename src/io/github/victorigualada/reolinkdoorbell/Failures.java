@@ -5,7 +5,6 @@ final class Failures {
     private Failures() {}
     // Network/decoder exceptions may embed secret stream URLs. Never display raw messages.
     static String describe(Exception e, String fallback) {
-        if (e instanceof javax.net.ssl.SSLException) return "HTTPS failed; turn off HTTPS in settings or check the doorbell certificate";
         if (e instanceof java.net.ConnectException) return "Doorbell refused the connection; check the address and that RTSP/HTTP are enabled";
         if (e instanceof java.net.SocketTimeoutException) return "Connection timed out; stopped audio and video";
         if (e instanceof java.net.UnknownHostException) return "Configured hostname could not be resolved";

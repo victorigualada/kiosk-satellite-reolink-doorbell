@@ -8,7 +8,7 @@ final class Settings {
     final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose;
     final float horizontal, vertical;
     final int rtspPort, httpPort, channel, controlSize, autoCloseSeconds, talkSeconds;
-    final boolean https, startMuted, autoOpen, wakeScreen, talkEnabled;
+    final boolean startMuted, autoOpen, wakeScreen, talkEnabled;
 
     Settings(Map<String, Object> m) {
         host = text(m, "host").trim();
@@ -20,7 +20,6 @@ final class Settings {
             if (value.contains("\r") || value.contains("\n")) throw new IllegalArgumentException("Invalid username or password format");
         rtspPort = port(m, "rtspPort", 554);
         httpPort = port(m, "httpPort", 80);
-        https = flag(m, "https", false);
         channel = number(m, "channel", 0, 0, 15);
         stream = choice(m, "stream", "sub", "sub", "main");
         sizing = choice(m, "sizing", "Fit", "Fit", "Fill", "Stretch");
@@ -52,7 +51,7 @@ final class Settings {
     }
     URI apiUrl(String query) {
         requireConnection();
-        return URI.create((https ? "https://" : "http://") + bracketed() + ":" + httpPort + "/cgi-bin/api.cgi?" + query);
+        return URI.create("http://" + bracketed() + ":" + httpPort + "/cgi-bin/api.cgi?" + query);
     }
     private String bracketed() {
         String h = host.replace("[", "").replace("]", "");
