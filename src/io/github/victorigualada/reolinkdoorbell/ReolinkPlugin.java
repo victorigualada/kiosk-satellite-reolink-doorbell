@@ -20,7 +20,7 @@ public final class ReolinkPlugin implements KioskPlugin {
     private final AtomicInteger generation = new AtomicInteger();
     private final Object validationLock = new Object();
     private String validationRun = "";
-    private ReolinkApi validation;
+    private AutoCloseable validation;
 
     public void start(PluginHost host, Map<String, Object> values) {
         this.host = host;
@@ -123,12 +123,45 @@ public final class ReolinkPlugin implements KioskPlugin {
         }, "reolink-validate");
         worker.setDaemon(true); worker.start();
     }
+    /**
+     * Times how soon video starts over RTSP and over HTTP-FLV, each twice and in both orders with pauses between,
+     * so a stream the doorbell still has warm from the previous try does not favour either one.
+     */
+    private void measure(String run) {
+        Settings snapshot = settings;
+        StartupProbe probe;
+        try { probe = new StartupProbe(snapshot); }
+        catch (IllegalArgumentException e) { report(run, "error", Failures.describe(e, "Configure the doorbell first")); return; }
+        synchronized (validationLock) { cancelValidation(); validationRun = run; validation = probe; }
+        Thread worker = new Thread(() -> {
+            try {
+                StringBuilder out = new StringBuilder();
+                String[] order = {"rtsp", "flv", "flv", "rtsp"};
+                for (int i = 0; i < order.length; i++) {
+                    report(run, "running", "Measuring " + (order[i].equals("rtsp") ? "RTSP" : "HTTP-FLV") + " (" + (i + 1) + " of 4, about a minute)");
+                    for (int wait = 0; i > 0 && wait < 20 && !probe.cancelled(); wait++) Thread.sleep(500);
+                    if (probe.cancelled()) return;
+                    StartupProbe.Result r = order[i].equals("rtsp") ? probe.rtsp() : probe.flv();
+                    out.append(r.describe(order[i].equals("rtsp") ? "RTSP" : "HTTP-FLV")).append('\n');
+                }
+                report(run, "success", out.toString().trim());
+            } catch (InterruptedException e) {
+                report(run, "error", "Measurement cancelled");
+            } finally {
+                synchronized (validationLock) { if (validation == probe) { validation = null; validationRun = ""; } }
+            }
+        }, "reolink-measure");
+        worker.setDaemon(true); worker.start();
+    }
     private void report(String run, String state, String message) {
         PluginHost h = host; if (h == null) return;
         try { h.setupResult(run, state, DisplayText.limit(message, 1000)); } catch (RuntimeException | LinkageError ignored) {}
     }
     private void cancelValidation() {
-        synchronized (validationLock) { ReolinkApi old = validation; validation = null; validationRun = ""; if (old != null) old.close(); }
+        synchronized (validationLock) {
+            AutoCloseable old = validation; validation = null; validationRun = "";
+            if (old != null) try { old.close(); } catch (Exception ignored) {}
+        }
     }
     private void status(String message, boolean error) {
         PluginHost h = host; if (h == null) return;
@@ -141,6 +174,9 @@ public final class ReolinkPlugin implements KioskPlugin {
         }
         if ("settings.button".equals(event) && "validateConnection".equals(payload.get("id")) && payload.get("run") instanceof String) {
             validate((String) payload.get("run")); return;
+        }
+        if ("settings.button".equals(event) && "measureStartup".equals(payload.get("id")) && payload.get("run") instanceof String) {
+            measure((String) payload.get("run")); return;
         }
         if ("settings.cancel".equals(event)) {
             synchronized (validationLock) { if (Objects.equals(validationRun, payload.get("run"))) cancelValidation(); }

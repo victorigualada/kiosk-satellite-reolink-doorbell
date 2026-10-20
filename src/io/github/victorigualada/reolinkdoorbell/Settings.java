@@ -54,6 +54,11 @@ final class Settings {
         requireConnection();
         return URI.create("http://" + bracketed() + ":" + httpPort + "/cgi-bin/api.cgi?" + query);
     }
+    /** Reolink's HTTP-FLV stream, served on the HTTP API port. */
+    URI flvUrl(String query) {
+        requireConnection();
+        return URI.create("http://" + bracketed() + ":" + httpPort + "/flv?" + query);
+    }
     private String bracketed() {
         String h = host.replace("[", "").replace("]", "");
         return h.indexOf(':') >= 0 ? "[" + h + "]" : h;

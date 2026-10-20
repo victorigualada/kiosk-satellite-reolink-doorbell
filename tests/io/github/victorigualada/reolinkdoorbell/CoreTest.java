@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); flv();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -223,5 +223,11 @@ public final class CoreTest {
         List<byte[]> units = VideoParameters.annexB(rewritten);
         check(units.size() == 2 && Arrays.equals(units.get(0), patched) && units.get(1)[0] == 0x65, "Access unit carries the patched SPS and the slice untouched");
         check(SpsPatch.accessUnit(new byte[] {0, 0, 0, 1, 0x41, 9}).length == 6, "Units without an SPS pass through");
+    }
+    static void flv() {
+        check(StartupProbe.keyframe(new byte[] {0x17, 1, 0, 0, 0}) && !StartupProbe.keyframe(new byte[] {0x17, 0, 0, 0, 0}), "AVC keyframe tag, not the sequence header");
+        check(!StartupProbe.keyframe(new byte[] {0x27, 1}) && StartupProbe.keyframe(new byte[] {0x1c, 1}), "Inter frames are not keyframes; HEVC tags work too");
+        Settings s = new Settings(base());
+        check(s.flvUrl("port=1935").toString().equals("http://192.168.1.50:80/flv?port=1935"), "FLV URL uses the HTTP port");
     }
 }
