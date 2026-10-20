@@ -278,8 +278,8 @@ final class StreamPlayer implements AutoCloseable {
                                     if (System.nanoTime() - echoNote > 5_000_000_000L) {
                                         echoNote = System.nanoTime();
                                         long delay = c.delayMillis();
-                                        listener().status(delay < 0 ? "Echo canceller: listening for your voice coming back"
-                                            : String.format(Locale.ROOT, "Echo canceller: your voice comes back after %d ms, cancelling %.0f dB", delay, c.cancellingDb()), false);
+                                        listener().status(delay < 0 ? "Echo canceller: listening for your voice coming back — " + c.search()
+                                            : String.format(Locale.ROOT, "Echo canceller: your voice comes back after %d ms, cancelling %.0f dB — %s", delay, c.cancellingDb(), c.search()), false);
                                     }
                                 }
                             }

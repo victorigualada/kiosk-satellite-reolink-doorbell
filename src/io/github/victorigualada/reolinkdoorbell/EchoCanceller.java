@@ -24,10 +24,10 @@ package io.github.victorigualada.reolinkdoorbell;
 final class EchoCanceller {
     /** Filter span, centred on the estimated delay to absorb its error and jitter: 1024 taps at 16 kHz. */
     static final int SPAN_MS = 64;
-    static final int ENVELOPE_MS = 10, HISTORY_MS = 4000, MAX_DELAY_MS = 1500;
-    static final double MIN_CORRELATION = 0.5, STEP = 0.4, REGULARIZATION = 1e3;
+    static final int ENVELOPE_MS = 10, HISTORY_MS = 6000, MAX_DELAY_MS = 3000;
+    static final double MIN_CORRELATION = 0.4, STEP = 0.4, REGULARIZATION = 1e3;
     /** Below this reference level (RMS, 16-bit) there is nothing to cancel and nothing to learn from. */
-    static final double SILENCE = 100;
+    static final double SILENCE = 30;
 
     final int rate, taps, block;
     // Reference ring: resampled sent audio, with the wall time (µs) of ring index 0's sample tracked as refStart.
@@ -48,7 +48,9 @@ final class EchoCanceller {
     private double blockInput, blockForeground, blockBackground;
     private int blockSamples, blockActive, better, worse, diverged;
     private boolean suppress;
-    private volatile double cancelling; // Smoothed echo return loss enhancement of the foreground, in power ratio.
+    private volatile double cancelling;
+    // What the last delay search saw, for diagnostics.
+    private double sentLevel, receivedLevel, bestCorrelation; private int activeMillis, bestLagMillis = -1; // Smoothed echo return loss enhancement of the foreground, in power ratio.
 
     EchoCanceller(int rate) {
         this.rate = rate; taps = rate * SPAN_MS / 1000; block = rate / 50;
@@ -182,16 +184,21 @@ final class EchoCanceller {
             long bin = last - bins + 1 + i; int at = (int) (bin % bins);
             out[i] = sentBins[at] == bin ? sentEnvelope[at] : 0; in[i] = receivedBins[at] == bin ? receivedEnvelope[at] : 0;
         }
-        // Half a second of you talking is enough loudness pattern to match without false hits.
-        int active = 0; for (int i = 0; i < bins - maxLag; i++) if (out[i] > 4 * SILENCE) active++;
-        if (active < 500 / ENVELOPE_MS) return;
-        double best = MIN_CORRELATION; int lag = -1;
-        int n = bins - maxLag;
+        // Half a second of you talking is enough loudness pattern to match without false hits. Talking is relative to
+        // your loudest moment, since the microphone's level depends on the tablet and how far away you stand.
+        double peak = 0, sentSum = 0, receivedSum = 0;
+        for (int i = 0; i < bins; i++) { peak = Math.max(peak, out[i]); sentSum += out[i]; receivedSum += in[i]; }
+        int active = 0; for (int i = 0; i < bins; i++) if (out[i] > Math.max(SILENCE / 2, peak / 4)) active++;
+        sentLevel = sentSum / bins; receivedLevel = receivedSum / bins; activeMillis = active * ENVELOPE_MS;
+        if (active < 500 / ENVELOPE_MS) { bestCorrelation = 0; bestLagMillis = -1; return; }
+        // Each lag compares all the history it can: what you sent up to that lag ago against what came back after it.
+        double best = -1; int lag = -1;
         for (int l = 0; l <= maxLag; l++) {
-            double r = correlation(out, 0, in, l, n);
+            double r = correlation(out, 0, in, l, bins - l);
             if (r > best) { best = r; lag = l; }
         }
-        if (lag < 0) return;
+        bestCorrelation = best; bestLagMillis = lag * ENVELOPE_MS;
+        if (best < MIN_CORRELATION) return;
         long next = (long) lag * ENVELOPE_MS * 1000;
         // Small moves are envelope jitter the span absorbs. Moderate ones keep the learned path, shifted along with the
         // window by process(); a move beyond half the span is a different path, learned from scratch.
@@ -216,6 +223,11 @@ final class EchoCanceller {
         return aa == 0 || bb == 0 ? 0 : ab / Math.sqrt(aa * bb);
     }
     synchronized long delayMillis() { return delayMicros < 0 ? -1 : delayMicros / 1000; }
+    /** One line on the delay search, for the diagnostics overlay. */
+    synchronized String search() {
+        return String.format(java.util.Locale.ROOT, "you sent %.0f, came back %.0f (RMS), %.1f s of speech, best match %.2f at %d ms",
+            sentLevel, receivedLevel, activeMillis / 1000.0, bestCorrelation, bestLagMillis);
+    }
     /** How much the foreground filter is cancelling lately, in dB; 0 before it has learned anything. */
     double cancellingDb() { return 10 * Math.log10(Math.max(1, cancelling)); }
 }
