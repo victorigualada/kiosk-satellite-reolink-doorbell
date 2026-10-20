@@ -16,7 +16,8 @@ package io.github.victorigualada.reolinkdoorbell;
  *   <li>Two paths keep the visitor's voice safe when you both talk at once: a background filter always learns (NLMS),
  *       and the foreground filter that does the cancelling only takes its place after it has cancelled clearly
  *       better for a while. A visitor talking over you makes the background worse, so it is never copied then.</li>
- *   <li>A light residual suppressor takes the edge off what the linear filter leaves while only you are talking.</li>
+ *   <li>A light residual suppressor takes the edge off what the linear filter leaves while only you are talking, and
+ *       {@link EchoSuppressor} then turns down, band by band, what still sounds like your voice.</li>
  * </ol>
  *
  * <p>Thread use: {@link #reference} from the talk thread, {@link #process} from the stream thread.
@@ -24,7 +25,7 @@ package io.github.victorigualada.reolinkdoorbell;
 final class EchoCanceller {
     /** Filter span, centred on the estimated delay to absorb its error and jitter: 1024 taps at 16 kHz. */
     static final int SPAN_MS = 64;
-    static final int ENVELOPE_MS = 10, HISTORY_MS = 6000, MAX_DELAY_MS = 3000;
+    static final int ENVELOPE_MS = 10, HISTORY_MS = 6000, MAX_DELAY_MS = 2000;
     static final double MIN_CORRELATION = 0.4, STEP = 0.4, REGULARIZATION = 1e3;
     /** Below this reference level (RMS, 16-bit) there is nothing to cancel and nothing to learn from. */
     static final double SILENCE = 30;
@@ -41,6 +42,7 @@ final class EchoCanceller {
     private double inStartMicros = Double.NaN;
     private long received;
     private final double[] foreground, background;
+    private final EchoSuppressor suppressor;
     private long delayMicros = -1;
     private long lastEstimateMillis = Long.MIN_VALUE / 2;
     private long alignment = Long.MIN_VALUE; // Reference index minus incoming index the weights were learned at.
@@ -48,13 +50,14 @@ final class EchoCanceller {
     private double blockInput, blockForeground, blockBackground;
     private int blockSamples, blockActive, better, worse, diverged;
     private boolean suppress;
-    private volatile double cancelling;
+    private volatile double linear; // The same for the linear filter alone.
+    private volatile double cancelling; // Smoothed echo reduction of filter and suppressor together, in power ratio.
     // What the last delay search saw, for diagnostics.
-    private double sentLevel, receivedLevel, bestCorrelation; private int activeMillis, bestLagMillis = -1; // Smoothed echo return loss enhancement of the foreground, in power ratio.
+    private double sentLevel, receivedLevel, bestCorrelation; private int activeMillis, bestLagMillis = -1;
 
     EchoCanceller(int rate) {
         this.rate = rate; taps = rate * SPAN_MS / 1000; block = rate / 50;
-        foreground = new double[taps]; background = new double[taps];
+        foreground = new double[taps]; background = new double[taps]; suppressor = new EchoSuppressor(rate);
         ring = new float[rate * (HISTORY_MS / 1000 + 1)];
         sentEnvelope = new double[HISTORY_MS / ENVELOPE_MS];
         receivedEnvelope = new double[HISTORY_MS / ENVELOPE_MS];
@@ -115,7 +118,13 @@ final class EchoCanceller {
                 x[i] = k >= 0 && k < written && k >= written - ring.length ? ring[(int) (k % ring.length)] : 0;
             }
         }
+        double before = 0, sent = 0; double[] aligned = new double[n];
+        for (int j = 0; j < n; j++) { before += (double) d[j] * d[j]; aligned[j] = x[j + taps / 2 - 1]; sent += aligned[j] * aligned[j]; }
         filter(d, n, x);
+        suppressor.process(d, aligned, n);
+        double after = 0; for (int j = 0; j < n; j++) after += (double) d[j] * d[j];
+        // Total reduction while you talk and something comes back (the suppressor's frame of latency blurs it a little).
+        if (sent > SILENCE * SILENCE * n && before > 25.0 * n) cancelling = 0.9 * cancelling + 0.1 * before / Math.max(after, n);
     }
 
     /** Both filters over the aligned reference window {@code x}: sample j uses x[j .. j+taps-1], newest last. */
@@ -157,7 +166,7 @@ final class EchoCanceller {
         diverged = fg > 2 * in ? diverged + 1 : 0;
         if (diverged >= 5) { java.util.Arrays.fill(foreground, 0); diverged = 0; fg = in; }
         double ratio = in / Math.max(fg, 1);
-        cancelling = 0.9 * cancelling + 0.1 * ratio;
+        linear = 0.9 * linear + 0.1 * ratio;
         // Only you talking and the filter cancelling 9 dB or more: what is left is echo too, take the edge off it.
         // With the visitor talking the ratio falls, and their voice passes untouched.
         suppress = ratio > 8;
@@ -228,6 +237,8 @@ final class EchoCanceller {
         return String.format(java.util.Locale.ROOT, "you sent %.0f, came back %.0f (RMS), %.1f s of speech, best match %.2f at %d ms",
             sentLevel, receivedLevel, activeMillis / 1000.0, bestCorrelation, bestLagMillis);
     }
-    /** How much the foreground filter is cancelling lately, in dB; 0 before it has learned anything. */
+    /** How much echo is removed lately, filter and suppressor together, in dB; 0 before it has learned anything. */
     double cancellingDb() { return 10 * Math.log10(Math.max(1, cancelling)); }
+    /** The linear filter's share of it, in dB. */
+    double filterDb() { return 10 * Math.log10(Math.max(1, linear)); }
 }

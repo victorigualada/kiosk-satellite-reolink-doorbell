@@ -240,19 +240,22 @@ public final class CoreTest {
      * Runs a 12 s call: you talk throughout, the doorbell returns your voice {@code delayMs} later through a short
      * filter with {@code gain} and codec-like distortion, and the visitor talks over you from 8 to 11 s. Sent audio
      * is 20 ms microphone chunks; received audio is 1024-sample decoder chunks arriving with up to 30 ms jitter.
+     * With {@code wanderMs}, the echo delay drifts back and forth by that much, as a doorbell's playout buffer might.
      * Returns {delay estimate ms, echo reduction dB over 4-8 s, visitor SNR dB before, after}.
      */
-    static double[] call(int rate, int delayMs, double gain, double distortion, boolean visitor) {
+    static double[] call(int rate, int delayMs, double gain, double distortion, boolean visitor) { return call(rate, delayMs, gain, distortion, visitor, 0); }
+    static double[] call(int rate, int delayMs, double gain, double distortion, boolean visitor, double wanderMs) {
         int n = rate * 12, delay = delayMs * rate / 1000;
         double[] you = speech(7, n, rate), them = speech(9, n, rate), in = new double[n], out = new double[n];
         double[] path = {0.5, 0.2, -0.1, 0.05, 0.02};
         Random r = new Random(3);
         for (int i = 0; i < n; i++) {
-            double e = 0; for (int k = 0; k < path.length; k++) { int j = i - delay - k * 3; if (j >= 0) e += path[k] * you[j]; }
+            double e = 0; for (int k = 0; k < path.length; k++) { int j = i - delay - k * 3 - (int) (wanderMs * rate / 1000 * Math.sin(i * 0.7 / rate)); if (j >= 0) e += path[k] * you[j]; }
             e *= gain; e += distortion * Math.abs(e) * r.nextGaussian();
             in[i] = e + (visitor && i > 8 * rate && i < 11 * rate ? them[i] : 0) + 20 * r.nextGaussian();
         }
         EchoCanceller c = new EchoCanceller(rate);
+        int latency = new EchoSuppressor(rate).size - 1; // Output lags input by one suppressor frame once it runs.
         int chunkOut = rate / 50, chunkIn = 1024, sent = 0, got = 0; long t0 = 1_000_000_000L;
         while (got + chunkIn <= n) {
             long sendEnd = t0 + (long) ((sent + chunkOut) * 1e6 / rate);
@@ -263,7 +266,7 @@ public final class CoreTest {
             } else {
                 short[] d = new short[chunkIn]; for (int i = 0; i < chunkIn; i++) d[i] = (short) Math.max(-32768, Math.min(32767, in[got + i]));
                 c.process(d, chunkIn, arrive);
-                for (int i = 0; i < chunkIn; i++) out[got + i] = d[i];
+                for (int i = 0; i < chunkIn; i++) if (got + i >= latency) out[got + i - latency] = d[i];
                 got += chunkIn;
             }
         }
@@ -288,6 +291,14 @@ public final class CoreTest {
         check(loud[3] > 12 && loud[3] > loud[2] + 10, "The visitor talking over you stays clear (" + Math.round(loud[2]) + " → " + Math.round(loud[3]) + " dB)");
         double[] both = call(16000, 480, 1, 0.05, true);
         check(both[3] > 15 && both[3] > both[2] + 8, "Double talk keeps the visitor (" + Math.round(both[2]) + " → " + Math.round(both[3]) + " dB)");
+        double[] wandering = call(16000, 360, 1, 0.1, false, 5);
+        check(wandering[1] > 10, "Echo with a wandering delay still cut by the suppressor (" + Math.round(wandering[1]) + " dB)");
+        EchoSuppressor quiet = new EchoSuppressor(16000);
+        short[] speech = new short[16000]; double[] none = new double[speech.length];
+        for (int i = 0; i < speech.length; i++) speech[i] = (short) (2000 * Math.sin(i * 0.05) + 500 * Math.sin(i * 0.31));
+        short[] passed = speech.clone(); quiet.process(passed, none, passed.length);
+        double error = 0; for (int i = 4000; i < 16000; i++) error = Math.max(error, Math.abs(passed[i] - speech[i - quiet.size + 1]));
+        check(error <= 2, "With you silent the suppressor passes the visitor untouched, one frame late (" + error + ")");
         EchoCanceller idle = new EchoCanceller(16000);
         short[] visitorOnly = new short[1024]; for (int i = 0; i < visitorOnly.length; i++) visitorOnly[i] = (short) (i * 37 % 2000 - 1000);
         short[] copy = visitorOnly.clone(); idle.process(copy, copy.length, 1_000_000);
