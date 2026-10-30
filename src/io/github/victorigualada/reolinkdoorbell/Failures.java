@@ -11,7 +11,7 @@ final class Failures {
         if (e instanceof SecurityException) return "Microphone access denied. Grant Kiosk Satellite microphone access locally";
         if (e instanceof IllegalArgumentException) {
             String m = e.getMessage();
-            if (m != null && (m.startsWith("Doorbell address") || m.startsWith("Set the doorbell") || m.startsWith("Choose ") || m.startsWith("Out-of-range setting") || m.startsWith("Unsupported setting") || m.startsWith("Invalid username"))) return m;
+            if (m != null && (m.startsWith("Doorbell address") || m.startsWith("Set the doorbell") || m.startsWith("Choose ") || m.startsWith("Out-of-range setting") || m.startsWith("Unsupported setting") || m.startsWith("Invalid username") || m.startsWith("Pick the doorbell"))) return m;
         }
         // Only explicit application-owned IO errors, never messages from network/library code.
         StackTraceElement[] trace = e.getStackTrace();
