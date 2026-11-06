@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class Talkback implements AutoCloseable {
     interface Listener {
         void status(String text, boolean error); void microphoneActive(); void finished();
+        /** A prepared session ended before the green phone; {@code error} says why, or is null when it was closed. */
+        default void preparedEnded(Exception error) {}
         default void speaking(boolean speaking) {}
         /** The level the tablet's speaker is playing now, as PCM RMS. */
         default double far() { return 0; }
@@ -26,6 +28,10 @@ final class Talkback implements AutoCloseable {
     /** How long speech holds after the last loud chunk: long enough to cover the doorbell sending the voice back. */
     static final long HANGOVER_MS = 1200;
     static final String BACKCHANNEL = "Require: www.onvif.org/ver20/backchannel\r\n";
+    /** A fault that trying again will not fix, such as a doorbell without a talk channel. */
+    static final class Permanent extends IOException { Permanent(String message) { super(message); } }
+    /** How long a prepared session waits for the green phone before it lets go. */
+    static final long PREPARED_LIFETIME = 10L * 60 * 1_000_000_000L;
     static final String NO_BACKCHANNEL = "This doorbell does not offer two-way audio over RTSP; check its firmware";
     private final Context context; private final Settings settings; private final Listener listener;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -45,12 +51,25 @@ final class Talkback implements AutoCloseable {
         this.context = context; this.settings = settings; this.listener = listener;
     }
     /** Connects and describes now, quietly, so {@link #start} only has to take the talk channel and open the microphone. */
-    void prepare() { launch(); }
-    /** Starts talking, on the prepared session if there is one. */
-    void start() {
-        synchronized (goLock) { tappedAt = System.nanoTime(); deadline = tappedAt + settings.talkSeconds * 1_000_000_000L; go = true; goLock.notifyAll(); }
+    void prepare() {
+        synchronized (goLock) { if (!go) deadline = System.nanoTime() + PREPARED_LIFETIME; }
         launch();
     }
+    /**
+     * Starts talking, on the prepared session if there is one. Returns false when that session has already ended:
+     * then nothing will be reported for it, and the caller starts a new one.
+     */
+    boolean start() {
+        synchronized (goLock) {
+            if (ended) return false;
+            tappedAt = System.nanoTime(); deadline = tappedAt + settings.talkSeconds * 1_000_000_000L; go = true; goLock.notifyAll();
+        }
+        launch();
+        return true;
+    }
+    /** The fault that ended a prepared session, if it is one trying again will not fix. */
+    Exception permanentFailure() { Exception f = failure; return ended && isPermanent(f) ? f : null; }
+    static boolean isPermanent(Exception e) { return e instanceof Permanent || e instanceof SecurityException; }
     /** Whether a prepared session can still be started: set up, or still setting up, and not failed. */
     boolean usable() { return !ended && !closed.get() && failure == null; }
     private synchronized void launch() {
@@ -71,12 +90,11 @@ final class Talkback implements AutoCloseable {
             Sdp.Track track = described.track; URI base = described.base;
             RtspClient client = described.client;
             if (!active()) return;
-            // The encoder is ready ahead too; only the microphone waits for the tap, so it is never open unasked.
+            // Only checks while preparing: the encoder and the microphone wait for the tap, so nothing is held unasked.
             boolean aac = "MPEG4-GENERIC".equals(track.codec);
-            if (track.channels != 1) throw new IOException("Only mono talk audio is supported");
-            if (aac) startEncoder(track.rate);
+            if (track.channels != 1) throw new Permanent("Only mono talk audio is supported");
             int minimum = AudioRecord.getMinBufferSize(track.rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            if (minimum <= 0) throw new IOException("Microphone does not support the doorbell's sample rate");
+            if (minimum <= 0) throw new Permanent("Microphone does not support the doorbell's sample rate");
             long ready = System.nanoTime();
             // Prepared: only connected and described. The talk channel itself (SETUP) is not taken until the green phone,
             // because the doorbell has one talk channel: holding it would hang up a call answered in the Reolink app.
@@ -85,7 +103,8 @@ final class Talkback implements AutoCloseable {
             while (!go && active()) {
                 synchronized (goLock) { if (!go) goLock.wait(1000); }
                 if (!go && !stale && System.nanoTime() - keepaliveAt > 10_000_000_000L) {
-                    try { client.exchange("OPTIONS", base, ""); } catch (IOException e) { stale = true; client.close(); }
+                    // Sent without waiting for the reply, so a tap is never held up behind it; SETUP skips the late reply.
+                    try { client.send("OPTIONS", base, ""); } catch (IOException e) { stale = true; client.close(); }
                     keepaliveAt = System.nanoTime();
                 }
             }
@@ -103,6 +122,7 @@ final class Talkback implements AutoCloseable {
                 track = described.track; base = described.base; client = described.client;
                 channel = setup(client, base, track);
             }
+            if (aac) startEncoder(track.rate);
             final RtspClient talking = client;
             client.request("PLAY", base, "Range: npt=0.000-\r\n" + BACKCHANNEL);
             long playing = System.nanoTime();
@@ -187,8 +207,9 @@ final class Talkback implements AutoCloseable {
                 try { encoder.release(); } catch (RuntimeException ignored) {} encoder = null;
             }
             if (voice.speaking()) listener.speaking(false);
-            ended = true;
-            if (go) listener.finished();
+            boolean tapped;
+            synchronized (goLock) { ended = true; tapped = go; }
+            if (tapped) listener.finished(); else listener.preparedEnded(closed.get() ? null : failure);
         }
     }
     private static final class Described {
@@ -201,11 +222,11 @@ final class Talkback implements AutoCloseable {
         if (closed.get()) client.close();
         client.connect(url);
         Protocol.Message description = client.exchange("DESCRIBE", url, "Accept: application/sdp\r\n" + BACKCHANNEL);
-        if (description.status == 551) throw new IOException(NO_BACKCHANNEL);
+        if (description.status == 551) throw new Permanent(NO_BACKCHANNEL);
         if (description.status < 200 || description.status >= 300) throw new IOException("Doorbell refused two-way audio (status " + description.status + ")");
         List<Sdp.Track> tracks = Sdp.parse(new String(description.body, "UTF-8"));
         Sdp.Track track = Sdp.backchannel(tracks);
-        if (track == null) throw new IOException(Sdp.hasBackchannel(tracks) ? "The doorbell's talk codec is not supported yet" : NO_BACKCHANNEL);
+        if (track == null) throw new Permanent(Sdp.hasBackchannel(tracks) ? "The doorbell's talk codec is not supported yet" : NO_BACKCHANNEL);
         URI base = url;
         if (description.headers.containsKey("content-base")) base = Sdp.control(url, description.headers.get("content-base"));
         return new Described(client, track, base);
@@ -250,7 +271,7 @@ final class Talkback implements AutoCloseable {
         format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(4096, rate / 10));
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format);
-        if (name == null) throw new IOException("This tablet has no AAC encoder for the doorbell's sample rate");
+        if (name == null) throw new Permanent("This tablet has no AAC encoder for the doorbell's sample rate");
         encoder = MediaCodec.createByCodecName(name); encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE); encoder.start(); encoderStarted = true;
     }
     /** Stop and send share the gate: no audio goes out after close returns. */
@@ -278,6 +299,7 @@ final class Talkback implements AutoCloseable {
     }
     public void close() {
         closed.set(true);
+        synchronized (goLock) { goLock.notifyAll(); } // Wake a prepared session waiting for the tap, so it ends now.
         // Closing the socket first (off this thread) unblocks a send that holds the gate.
         RtspClient c = rtsp; if (c != null) c.close();
         synchronized (gate) {
