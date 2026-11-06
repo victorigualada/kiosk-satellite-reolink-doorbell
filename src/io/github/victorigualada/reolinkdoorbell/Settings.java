@@ -5,7 +5,7 @@ import java.net.URI;
 import java.util.Map;
 
 final class Settings {
-    final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose, echo;
+    final String host, username, password, stream, sizing, viewport, controls, lockEntity, visitorEntity, autoClose, echo, doorbell;
     final float horizontal, vertical;
     final int rtspPort, httpPort, channel, controlSize, autoCloseSeconds, talkSeconds;
     final boolean startMuted, autoOpen, wakeScreen, talkEnabled, diagnostics;
@@ -14,6 +14,8 @@ final class Settings {
         host = text(m, "host").trim();
         if (!host.isEmpty() && !host.matches("[A-Za-z0-9.-]{1,253}|\\[?[0-9A-Fa-f:.]{2,45}\\]?"))
             throw new IllegalArgumentException("Doorbell address must be a hostname or IP, without scheme, port or path");
+        doorbell = text(m, "doorbell").trim();
+        if (doorbell.length() > 512 || !doorbell.matches("[A-Za-z0-9:._/-]*")) throw new IllegalArgumentException("Pick the doorbell again from the list");
         username = text(m, "username").trim();
         password = text(m, "password");
         for (String value : new String[] {username, password})

@@ -21,6 +21,8 @@ import me.jxl.kiosk.plugins.KsTheme;
 final class CameraView extends FrameLayout implements TextureView.SurfaceTextureListener, Application.ActivityLifecycleCallbacks {
     private final Settings settings;
     private final Runnable closeAction;
+    /** Looks for the doorbell at a new address when nothing answers at the configured one. */
+    private final Runnable relocate;
     private final FrameLayout viewport;
     private final TextureView texture;
     private final TextView status;
@@ -48,8 +50,8 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private StreamPlayer early;
 
     /** {@code early} is a stream the plugin started while the overlay was opening, or null. The view owns it. */
-    CameraView(Context context, KsTheme theme, Settings settings, StreamPlayer early, Runnable closeAction, Runnable toggleLock) {
-        super(context); this.early = early; this.theme = theme; this.settings = settings; this.closeAction = closeAction; listeningMuted = settings.startMuted;
+    CameraView(Context context, KsTheme theme, Settings settings, StreamPlayer early, Runnable closeAction, Runnable toggleLock, Runnable relocate) {
+        super(context); this.early = early; this.relocate = relocate; this.theme = theme; this.settings = settings; this.closeAction = closeAction; listeningMuted = settings.startMuted;
         idleTimer = new IdleTimeout(settings.autoCloseSeconds, android.os.SystemClock.uptimeMillis());
         music = new MusicFocus(context, () -> { stopTalk(); audioInterrupted = true; listeningMuted = true; styleListen(); applyMute(); message("Audio interrupted — tap Listen to resume", false); });
         setBackgroundColor(Color.BLACK); setKeepScreenOn(true); setClickable(true);
@@ -228,6 +230,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
             public void status(String text, boolean error) { if (error || settings.diagnostics) postPlayback(token, () -> showMessage(text, error)); }
             public void size(int width, int height) { postPlayback(token, () -> { videoWidth = width; videoHeight = height; layoutImage(); }); }
             public void failed() { postPlayback(token, () -> { playbackCallbacks.next(); if (player != null) { player.close(); player = null; } music.close(); }); }
+            public void unreachable() { postPlayback(token, relocate); }
         };
         StreamPlayer warm = early; early = null;
         Surface surface = new Surface(st);
