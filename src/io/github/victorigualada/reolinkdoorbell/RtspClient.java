@@ -15,11 +15,14 @@ final class RtspClient implements AutoCloseable {
     private final Object writer = new Object();
     private InputStream in; private OutputStream out; private int cseq;
     String session = "";
+    /** Nothing answered the connection itself, unlike a slow reply on an open one. */
+    static final class ConnectTimeout extends SocketTimeoutException { ConnectTimeout() { super("connect timed out"); } }
 
     RtspClient(Settings settings) { this.settings = settings; auth = new RtspAuth(settings.username, settings.password); }
     void connect(URI url) throws IOException {
         if (closed.get()) throw new IOException("Stream closed");
-        socket.connect(new InetSocketAddress(url.getHost(), url.getPort()), 8000);
+        try { socket.connect(new InetSocketAddress(url.getHost(), url.getPort()), 8000); }
+        catch (SocketTimeoutException e) { throw new ConnectTimeout(); }
         socket.setSoTimeout(15000); socket.setTcpNoDelay(true);
         in = new BufferedInputStream(socket.getInputStream()); out = socket.getOutputStream();
     }
