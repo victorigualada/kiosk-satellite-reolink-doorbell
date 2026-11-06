@@ -73,6 +73,7 @@ for field in manifest['settings']:
 assert [c['id'] for c in manifest['commands']] == ['show', 'hide', 'ring']
 assert [t['id'] for t in manifest['triggers']] == ['ring']
 assert [b['id'] for b in manifest['buttons']] == ['validateConnection']
+assert fields['doorbell']['choices'] == 'plugin' and fields['doorbell']['type'] == 'string' and [f['key'] for f in manifest['settings']][:2] == ['doorbell', 'host']
 
 runtime_sources = '\n'.join(p.read_text() for p in (ROOT / 'src').rglob('*.java'))
 assert not any(s in runtime_sources for s in ('System.out.', 'System.err.', 'printStackTrace(', 'android.util.Log.')), 'No logging that could leak credentials'
