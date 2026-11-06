@@ -34,6 +34,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private final MusicFocus music;
     private boolean statusError, audioInterrupted;
     private Talkback talk;
+    private boolean framed;
     private volatile Talkback ready; // Set up ahead while the viewer is open, so the green phone opens the microphone fast.
     private boolean talking;
     private final Application application;
@@ -189,15 +190,17 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
             public double far() { StreamPlayer p = player; return p == null ? 0 : p.farLevel(); }
             public void finished() {
                 post(() -> {
+                    // Whoever ended it (the green phone, the time limit, a lost focus), get the next one ready.
+                    if (!disposed) postDelayed(CameraView.this::prepareTalk, 1000);
                     if (talk != owner[0]) return;
                     talk = null; talking = false;
-                    if (!disposed) { styleTalk(); applyMute(); postDelayed(CameraView.this::prepareTalk, 1000); }
+                    if (!disposed) { styleTalk(); applyMute(); }
                 });
             }
         });
         return owner[0];
     }
-    /** Connects and sets up the next talk session in the background; it stays silent until the green phone. */
+    /** Connects the next talk session in the background without taking the doorbell's talk channel; it stays silent until the green phone. */
     private void prepareTalk() {
         if (!settings.talkEnabled || disposed || stopping || talk != null || ready != null) return;
         ready = newTalk(); ready.prepare();
@@ -241,11 +244,14 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
             next = new StreamPlayer(settings, surface, events); next.start();
         }
         player = next; if (stopping) next.close(); applyMute(); layoutImage();
-        prepareTalk();
+        framed = false;
     }
     private void postPlayback(long token, Runnable action) { post(() -> { if (!disposed && !stopping && playbackCallbacks.current(token)) action.run(); }); }
     public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {}
-    public void onSurfaceTextureUpdated(SurfaceTexture st) {}
+    public void onSurfaceTextureUpdated(SurfaceTexture st) {
+        // Prepare talk once the first image is up, so it never competes with the video start-up.
+        if (!framed) { framed = true; prepareTalk(); }
+    }
     public boolean onSurfaceTextureDestroyed(SurfaceTexture st) { playbackCallbacks.next(); if (player != null) { player.close(); player = null; } music.close(); return true; }
     @Override protected void onDetachedFromWindow() { dispose(); super.onDetachedFromWindow(); }
     @Override public void onWindowFocusChanged(boolean focus) { super.onWindowFocusChanged(focus); if (!focus && music != null) { stopTalk(); audioInterrupted = true; listeningMuted = true; styleListen(); music.close(); applyMute(); } }

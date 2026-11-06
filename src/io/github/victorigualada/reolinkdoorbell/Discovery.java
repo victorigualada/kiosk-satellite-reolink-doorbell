@@ -62,7 +62,7 @@ final class Discovery {
                     if (h != null && h.matches("\\d{1,3}(\\.\\d{1,3}){3}")) { host = h; break; }
                 } catch (IllegalArgumentException ignored) { /* Skip malformed addresses. */ }
             }
-            if (host == null || id.isEmpty() || id.length() > 512) continue;
+            if (host == null || id.isEmpty() || !Settings.validDoorbellId(id)) continue;
             found.add(new Device(id, host, scope(scopes, "name"), scope(scopes, "hardware")));
         }
         return found;
@@ -85,10 +85,14 @@ final class Discovery {
         list.sort(Comparator.comparingInt((Device d) -> d.doorbell() ? 0 : d.reolink() ? 1 : 2).thenComparing(d -> d.host));
         return list;
     }
-    /** The device to pick on its own: the only doorbell, else the only Reolink camera, else none. */
+    /** The device to pick on its own: the only Reolink doorbell, else the only Reolink camera, else none. Other brands never. */
     static Device obvious(Collection<Device> devices) {
         Device only = null; int doorbells = 0, reolinks = 0; Device onlyReolink = null;
-        for (Device d : devices) { if (d.doorbell()) { doorbells++; only = d; } if (d.reolink()) { reolinks++; onlyReolink = d; } }
+        for (Device d : devices) {
+            if (!d.reolink()) continue;
+            reolinks++; onlyReolink = d;
+            if (d.doorbell()) { doorbells++; only = d; }
+        }
         return doorbells == 1 ? only : doorbells == 0 && reolinks == 1 ? onlyReolink : null;
     }
 

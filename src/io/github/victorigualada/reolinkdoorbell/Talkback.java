@@ -31,7 +31,7 @@ final class Talkback implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object gate = new Object();
     private volatile long deadline = Long.MAX_VALUE;
-    // Prepared ahead: the session is set up while the viewer is open, and waits for the green phone to PLAY.
+    // Prepared ahead: connected and described while the viewer is open; the talk channel is taken (SETUP, PLAY) on the green phone.
     private final Object goLock = new Object();
     private volatile boolean go, started, ended;
     private volatile long tappedAt;
@@ -44,7 +44,7 @@ final class Talkback implements AutoCloseable {
     Talkback(Context context, Settings settings, Listener listener) {
         this.context = context; this.settings = settings; this.listener = listener;
     }
-    /** Connects and sets up the talk channel now, quietly, so {@link #start} only has to play and open the microphone. */
+    /** Connects and describes now, quietly, so {@link #start} only has to take the talk channel and open the microphone. */
     void prepare() { launch(); }
     /** Starts talking, on the prepared session if there is one. */
     void start() {
@@ -67,21 +67,10 @@ final class Talkback implements AutoCloseable {
             status("Connecting the microphone to the doorbell", false);
             long begun = System.nanoTime();
             URI url = settings.streamUrl();
-            RtspClient client = new RtspClient(settings); rtsp = client;
+            Described described = describe(url);
+            Sdp.Track track = described.track; URI base = described.base;
+            RtspClient client = described.client;
             if (!active()) return;
-            client.connect(url);
-            if (!active()) return;
-            Protocol.Message description = client.exchange("DESCRIBE", url, "Accept: application/sdp\r\n" + BACKCHANNEL);
-            if (description.status == 551) throw new IOException(NO_BACKCHANNEL);
-            if (description.status < 200 || description.status >= 300) throw new IOException("Doorbell refused two-way audio (status " + description.status + ")");
-            List<Sdp.Track> tracks = Sdp.parse(new String(description.body, "UTF-8"));
-            Sdp.Track track = Sdp.backchannel(tracks);
-            if (track == null) throw new IOException(Sdp.hasBackchannel(tracks) ? "The doorbell's talk codec is not supported yet" : NO_BACKCHANNEL);
-            URI base = url;
-            if (description.headers.containsKey("content-base")) base = Sdp.control(url, description.headers.get("content-base"));
-            Protocol.Message setup = client.request("SETUP", Sdp.control(base, track.control), "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n" + BACKCHANNEL);
-            int channel = interleavedChannel(setup.headers.getOrDefault("transport", ""));
-            client.session(setup);
             // The encoder is ready ahead too; only the microphone waits for the tap, so it is never open unasked.
             boolean aac = "MPEG4-GENERIC".equals(track.codec);
             if (track.channels != 1) throw new IOException("Only mono talk audio is supported");
@@ -89,18 +78,36 @@ final class Talkback implements AutoCloseable {
             int minimum = AudioRecord.getMinBufferSize(track.rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
             if (minimum <= 0) throw new IOException("Microphone does not support the doorbell's sample rate");
             long ready = System.nanoTime();
-            // Prepared: hold the set-up session open until the green phone, with a keepalive the doorbell answers.
+            // Prepared: only connected and described. The talk channel itself (SETUP) is not taken until the green phone,
+            // because the doorbell has one talk channel: holding it would hang up a call answered in the Reolink app.
+            boolean stale = false;
             long keepaliveAt = System.nanoTime();
             while (!go && active()) {
                 synchronized (goLock) { if (!go) goLock.wait(1000); }
-                if (!go && System.nanoTime() - keepaliveAt > 10_000_000_000L) { client.exchange("OPTIONS", base, ""); keepaliveAt = System.nanoTime(); }
+                if (!go && !stale && System.nanoTime() - keepaliveAt > 10_000_000_000L) {
+                    try { client.exchange("OPTIONS", base, ""); } catch (IOException e) { stale = true; client.close(); }
+                    keepaliveAt = System.nanoTime();
+                }
             }
             if (!active()) return;
             long from = Math.max(tappedAt, ready);
+            int channel;
+            try { channel = setup(client, base, track); }
+            catch (IOException e) {
+                // A prepared connection the doorbell dropped while waiting: connect again once, now that it is asked for.
+                if (ready > tappedAt || !active()) throw e;
+                client.close();
+                described = describe(url);
+                if (described.track.rate != track.rate || described.track.channels != track.channels || !described.track.codec.equals(track.codec))
+                    throw new IOException("The doorbell's talk codec changed; try again");
+                track = described.track; base = described.base; client = described.client;
+                channel = setup(client, base, track);
+            }
+            final RtspClient talking = client;
             client.request("PLAY", base, "Range: npt=0.000-\r\n" + BACKCHANNEL);
             long playing = System.nanoTime();
             if (!active()) return;
-            Thread reader = new Thread(() -> drain(client), "reolink-talk-reader"); reader.setDaemon(true); reader.start();
+            Thread reader = new Thread(() -> drain(talking), "reolink-talk-reader"); reader.setDaemon(true); reader.start();
             AudioRecord capture = new AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setSampleRate(track.rate).build())
                 .setBufferSizeInBytes(Math.max(minimum * 2, track.rate / 5)).build();
@@ -118,7 +125,7 @@ final class Talkback implements AutoCloseable {
             // Where the wait after the tap went; a prepared session skips the connection and setup.
             if (settings.diagnostics) listener.status("Microphone open " + StreamPlayer.seconds(open - tappedAt) + " after the tap: "
                 + (ready > tappedAt ? "connection and setup " + StreamPlayer.seconds(ready - begun) + ", " : "prepared ahead, ")
-                + "PLAY " + StreamPlayer.seconds(playing - from) + ", microphone " + StreamPlayer.seconds(open - playing), false);
+                + "SETUP and PLAY " + StreamPlayer.seconds(playing - from) + ", microphone " + StreamPlayer.seconds(open - playing), false);
             SecureRandom random = new SecureRandom();
             int sequence = random.nextInt(65536), ssrc = random.nextInt();
             long samples = 0, keepalive = System.nanoTime();
@@ -183,6 +190,32 @@ final class Talkback implements AutoCloseable {
             ended = true;
             if (go) listener.finished();
         }
+    }
+    private static final class Described {
+        final RtspClient client; final Sdp.Track track; final URI base;
+        Described(RtspClient client, Sdp.Track track, URI base) { this.client = client; this.track = track; this.base = base; }
+    }
+    /** Connects, signs in and asks for the backchannel track. Nothing on the doorbell is taken yet. */
+    private Described describe(URI url) throws IOException {
+        RtspClient client = new RtspClient(settings); rtsp = client;
+        if (closed.get()) client.close();
+        client.connect(url);
+        Protocol.Message description = client.exchange("DESCRIBE", url, "Accept: application/sdp\r\n" + BACKCHANNEL);
+        if (description.status == 551) throw new IOException(NO_BACKCHANNEL);
+        if (description.status < 200 || description.status >= 300) throw new IOException("Doorbell refused two-way audio (status " + description.status + ")");
+        List<Sdp.Track> tracks = Sdp.parse(new String(description.body, "UTF-8"));
+        Sdp.Track track = Sdp.backchannel(tracks);
+        if (track == null) throw new IOException(Sdp.hasBackchannel(tracks) ? "The doorbell's talk codec is not supported yet" : NO_BACKCHANNEL);
+        URI base = url;
+        if (description.headers.containsKey("content-base")) base = Sdp.control(url, description.headers.get("content-base"));
+        return new Described(client, track, base);
+    }
+    /** Takes the doorbell's talk channel; only after the green phone. Returns the interleaved channel to send on. */
+    private static int setup(RtspClient client, URI base, Sdp.Track track) throws IOException {
+        Protocol.Message setup = client.request("SETUP", Sdp.control(base, track.control), "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n" + BACKCHANNEL);
+        int channel = interleavedChannel(setup.headers.getOrDefault("transport", ""));
+        client.session(setup);
+        return channel;
     }
     /** Tracks speech; in Strong mode, sends silence while the person is not speaking, so the doorbell never hears itself. */
     private void heard(byte[] pcm, int n) {
