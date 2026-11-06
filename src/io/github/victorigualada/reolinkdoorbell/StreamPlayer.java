@@ -15,7 +15,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * so connecting and the keyframe wait overlap with waking the screen and opening the overlay.
  */
 final class StreamPlayer implements AutoCloseable {
-    interface Listener { void status(String message, boolean error); void size(int width, int height); void failed(); default void decoderFallback() {} default void connectionFailed(String reason) { failed(); } }
+    interface Listener { void status(String message, boolean error); void size(int width, int height); void failed(); default void decoderFallback() {} default void connectionFailed(String reason) { failed(); }
+        /** Nothing answered at the address: the doorbell may have moved to another IP. */
+        default void unreachable() {} }
     private static final Listener QUIET = new Listener() {
         public void status(String message, boolean error) {} public void size(int width, int height) {} public void failed() {}
     };
@@ -130,6 +132,7 @@ final class StreamPlayer implements AutoCloseable {
                 String reason = Failures.describe(e, "Stream failed; verify the doorbell address, RTSP port and selected stream");
                 Listener l = listener();
                 l.status(reason, true);
+                if (connecting && playing == 0 && FailureRouting.unreachable(e)) l.unreachable();
                 if (FailureRouting.setup(e, connecting)) l.connectionFailed(reason);
                 else l.failed();
             }

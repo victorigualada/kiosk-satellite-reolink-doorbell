@@ -21,6 +21,12 @@ public final class ReolinkPlugin implements KioskPlugin {
     private final Object validationLock = new Object();
     private String validationRun = "";
     private ReolinkApi validation;
+    // Discovery: the settings values last applied, so a found address can be merged in, and the cameras last found.
+    private final Object settingsLock = new Object();
+    private Map<String, Object> values = Collections.emptyMap();
+    private volatile List<Discovery.Device> devices = Collections.emptyList();
+    private final java.util.concurrent.atomic.AtomicBoolean searching = new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean relocating;
 
     public void start(PluginHost host, Map<String, Object> values) {
         this.host = host;
@@ -29,10 +35,12 @@ public final class ReolinkPlugin implements KioskPlugin {
             public void error(String message) { CameraView current = view; if (current != null) current.showError(message); }
         });
         apply(values);
+        discover(null);
         Thread codecs = new Thread(VideoDecoder::codecs, "reolink-codecs"); codecs.setDaemon(true); codecs.start();
     }
-    public void configure(Map<String, Object> values) { hide(); apply(values); }
+    public void configure(Map<String, Object> values) { hide(); apply(values); follow(); }
     private void apply(Map<String, Object> values) {
+        synchronized (settingsLock) { this.values = new HashMap<>(values); }
         Settings next;
         try { next = new Settings(values); }
         catch (IllegalArgumentException e) { status(Failures.describe(e, "Invalid settings"), true); next = new Settings(Collections.emptyMap()); }
@@ -42,6 +50,96 @@ public final class ReolinkPlugin implements KioskPlugin {
         if (next.host.isEmpty() || next.username.isEmpty()) status("Enter the doorbell address, username and password", false);
         else if (next.visitorEntity.isEmpty()) status("Ready. Choose the visitor sensor to open on a ring", false);
         else status("Ready. Opens when " + next.visitorEntity + " turns on", false);
+    }
+    /** A doorbell picked from the list: use the address it was last found at. */
+    private void follow() {
+        Settings s = settings;
+        if (s.doorbell.isEmpty()) return;
+        Discovery.Device d = find(devices, s.doorbell);
+        if (d == null) discover(null);
+        else if (!d.host.equals(s.host)) adopt(Collections.singletonMap("host", d.host));
+    }
+    private static Discovery.Device find(List<Discovery.Device> list, String id) {
+        for (Discovery.Device d : list) if (d.id.equals(id)) return d;
+        return null;
+    }
+    /** Saves settings the plugin worked out, and applies them here too: updateSettings does not call configure. */
+    private void adopt(Map<String, Object> updates) {
+        PluginHost h = host; if (h == null) return;
+        try { h.updateSettings(updates); } catch (RuntimeException | LinkageError ignored) { /* Older hosts: this session only. */ }
+        Map<String, Object> merged;
+        synchronized (settingsLock) { merged = new HashMap<>(values); merged.putAll(updates); }
+        apply(merged);
+    }
+    /**
+     * Searches the network for ONVIF cameras and lists them in the Doorbell picker. With nothing set up yet it picks
+     * the only doorbell it finds; with a doorbell picked it follows it to a new address; with only an address typed
+     * it learns which device that is, so it can follow it later. {@code run} is a Refresh run, or null on its own.
+     */
+    private void discover(String run) {
+        if (run == null && !searching.compareAndSet(false, true)) return;
+        Thread worker = new Thread(() -> {
+            try {
+                report(run, "running", "Searching the network for doorbells");
+                List<Discovery.Device> found = Discovery.search(3000);
+                devices = found;
+                PluginHost h = host; if (h == null) return;
+                String[] ids = new String[found.size()], labels = new String[found.size()];
+                for (int i = 0; i < ids.length; i++) { ids[i] = found.get(i).id; labels[i] = found.get(i).label(); }
+                try { h.setSettingChoices("doorbell", ids, labels); } catch (RuntimeException | LinkageError ignored) { /* Older hosts show a text field. */ }
+                Settings s = settings;
+                String note = "";
+                if (s.doorbell.isEmpty() && s.host.isEmpty()) {
+                    Discovery.Device d = Discovery.obvious(found);
+                    if (d != null) {
+                        Map<String, Object> pick = new HashMap<>(); pick.put("doorbell", d.id); pick.put("host", d.host); adopt(pick);
+                        note = " Picked " + d.label() + ".";
+                    }
+                } else if (!s.doorbell.isEmpty()) {
+                    Discovery.Device d = find(found, s.doorbell);
+                    if (d != null && !d.host.equals(s.host)) { adopt(Collections.singletonMap("host", d.host)); note = " The doorbell is now at " + d.host + "; address updated."; }
+                } else {
+                    for (Discovery.Device d : found) if (d.host.equals(s.host)) { adopt(Collections.singletonMap("doorbell", d.id)); break; }
+                }
+                report(run, "success", found.isEmpty()
+                    ? "No camera answered. Check that ONVIF is on in the Reolink app (Network > Advanced > Server settings), or type the address."
+                    : "Found " + found.size() + (found.size() == 1 ? " camera." : " cameras.") + note);
+            } catch (Exception e) {
+                report(run, "error", Failures.describe(e, "Could not search the network; type the doorbell's address instead"));
+            } finally { if (run == null) searching.set(false); }
+        }, "reolink-discovery");
+        worker.setDaemon(true); worker.start();
+    }
+    /**
+     * Nothing answered at the configured address. Look for the doorbell on the network: the picked one, or the only
+     * doorbell there. If it moved, save its new address and open the viewer again; once per opening.
+     */
+    private void relocate(int token) {
+        if (relocating) return;
+        relocating = true;
+        Settings s = settings;
+        CameraView v = view; if (v != null) v.showError("Nothing answers at " + s.host + "; looking for the doorbell on the network");
+        Thread worker = new Thread(() -> {
+            try {
+                List<Discovery.Device> found = Discovery.search(3000);
+                devices = found;
+                Discovery.Device d = s.doorbell.isEmpty() ? Discovery.obvious(found) : find(found, s.doorbell);
+                if (generation.get() != token) return;
+                if (d != null && !d.host.equals(s.host)) {
+                    Map<String, Object> moved = new HashMap<>(); moved.put("host", d.host); moved.put("doorbell", d.id);
+                    adopt(moved);
+                    show();
+                    return;
+                }
+                CameraView current = view;
+                if (current != null) current.showError(d == null
+                    ? "The doorbell was not found on the network; check that it is powered and that ONVIF is on, or set its address"
+                    : "The doorbell is still at " + s.host + " but did not answer; check that RTSP is on");
+            } catch (Exception e) {
+                CameraView current = view; if (current != null) current.showError(Failures.describe(e, "Could not search the network for the doorbell"));
+            } finally { relocating = false; }
+        }, "reolink-relocate");
+        worker.setDaemon(true); worker.start();
     }
     private void watchVisitor(String entity) {
         PluginHost h = host; if (h == null || entity.equals(watchedVisitor)) return;
@@ -84,7 +182,8 @@ public final class ReolinkPlugin implements KioskPlugin {
                 StreamPlayer stream = early == warming ? early : null; if (stream != null) warming = null;
                 CameraView created = new CameraView(context, theme, snapshot, stream,
                     () -> { if (generation.get() == token && view == owner[0]) hide(); },
-                    () -> { if (generation.get() == token && view == owner[0]) locks.toggle(); });
+                    () -> { if (generation.get() == token && view == owner[0]) locks.toggle(); },
+                    () -> { if (generation.get() == token && view == owner[0]) relocate(token); });
                 owner[0] = created;
                 if (generation.get() != token || host == null) { created.dispose(); return created; }
                 view = created; locks.refresh(); return created;
@@ -124,7 +223,7 @@ public final class ReolinkPlugin implements KioskPlugin {
         worker.setDaemon(true); worker.start();
     }
     private void report(String run, String state, String message) {
-        PluginHost h = host; if (h == null) return;
+        PluginHost h = host; if (h == null || run == null) return;
         try { h.setupResult(run, state, DisplayText.limit(message, 1000)); } catch (RuntimeException | LinkageError ignored) {}
     }
     private void cancelValidation() {
@@ -141,6 +240,9 @@ public final class ReolinkPlugin implements KioskPlugin {
         }
         if ("settings.button".equals(event) && "validateConnection".equals(payload.get("id")) && payload.get("run") instanceof String) {
             validate((String) payload.get("run")); return;
+        }
+        if ("settings.choices".equals(event) && "doorbell".equals(payload.get("key")) && payload.get("run") instanceof String) {
+            discover((String) payload.get("run")); return;
         }
         if ("settings.cancel".equals(event)) {
             synchronized (validationLock) { if (Objects.equals(validationRun, payload.get("run"))) cancelValidation(); }
