@@ -195,7 +195,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         });
         return owner[0];
     }
-    /** Connects and sets up the next talk session in the background; it stays silent until the green phone. */
+    /** Connects the next talk session in the background without taking the doorbell's talk channel; it stays silent until the green phone. */
     private void prepareTalk() {
         if (!settings.talkEnabled || disposed || stopping || talk != null || ready != null) return;
         ready = newTalk(); ready.prepare();
