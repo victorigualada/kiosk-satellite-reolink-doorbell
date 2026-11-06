@@ -19,14 +19,14 @@ A [Kiosk Satellite](https://kiosksatellite.com) plugin that shows a wired or PoE
 ## Requirements
 
 - A wired or PoE Reolink doorbell. The battery doorbell has no local RTSP without a Home Hub.
-- RTSP enabled on the doorbell (Reolink app: *Settings > Network > Advanced > Port settings*). Enable HTTP too if you want to use **Test connection**.
+- RTSP enabled on the doorbell (Reolink app: *Settings > Network > Advanced > Port settings*). Enable HTTP too if you want to use **Test connection**, and ONVIF if you want the plugin to find the doorbell on the network.
 - Kiosk Satellite with plugin SDK 1 and native overlays, on Android 8.0 or newer.
 - For auto-open on ring: Home Assistant's Reolink integration and the kiosk connected to Home Assistant.
 
 ## Set up
 
 1. In Kiosk Satellite, open **Settings > Plugin Manager**, choose **Add plugin** and paste `https://github.com/victorigualada/kiosk-satellite-reolink-doorbell`.
-2. Fill in the doorbell's address, username and password. Use **Test** to check them.
+2. Pick the doorbell under **Doorbell** (the plugin searches the network over ONVIF and picks it on its own when there is only one), or type its address. Then fill in the username and password and use **Test** to check them. A picked doorbell is followed if its IP address changes.
 3. Pick the doorbell's **Visitor sensor** (for example `binary_sensor.front_door_visitor`).
 4. Run **Simulate a doorbell ring** to check the viewer, then press the real doorbell.
 

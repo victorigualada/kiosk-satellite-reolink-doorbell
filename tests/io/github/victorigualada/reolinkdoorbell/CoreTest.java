@@ -19,7 +19,7 @@ public final class CoreTest {
     }
 
     public static void main(String[] args) throws Exception {
-        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); echo();
+        settings(); digest(); headers(); sdp(); h264(); visitor(); api(); talk(); rtsp(); sps(); echo(); discovery();
         System.out.println("PASS: " + passed + " checks");
     }
 
@@ -307,5 +307,37 @@ public final class CoreTest {
         short[] visitorOnly = new short[1024]; for (int i = 0; i < visitorOnly.length; i++) visitorOnly[i] = (short) (i * 37 % 2000 - 1000);
         short[] copy = visitorOnly.clone(); idle.process(copy, copy.length, 1_000_000);
         check(Arrays.equals(copy, visitorOnly) && idle.delayMillis() == -1, "Without your voice nothing is changed");
+    }
+    static String match(String id, String xaddrs, String scopes) {
+        return "<d:ProbeMatch><wsa:EndpointReference><wsa:Address>" + id + "</wsa:Address></wsa:EndpointReference>"
+            + "<d:Types>dn:NetworkVideoTransmitter</d:Types><d:Scopes>" + scopes + "</d:Scopes><d:XAddrs>" + xaddrs + "</d:XAddrs>"
+            + "<d:MetadataVersion>1</d:MetadataVersion></d:ProbeMatch>";
+    }
+    static void discovery() {
+        check(Discovery.probe("abc").contains("dn:NetworkVideoTransmitter") && Discovery.probe("abc").contains("uuid:abc"), "Probe asks for ONVIF cameras");
+        String scopes = "onvif://www.onvif.org/type/video_encoder onvif://www.onvif.org/name/Reolink%20Video%20Doorbell%20PoE onvif://www.onvif.org/hardware/D340P";
+        String xml = "<SOAP-ENV:Envelope><SOAP-ENV:Body><d:ProbeMatches>"
+            + match("urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7", "http://[fe80::1]/onvif http://192.168.1.77:8000/onvif/device_service", scopes)
+            + match("", "http://192.168.1.9/onvif", scopes)
+            + match("urn:uuid:no-ipv4", "http://[fe80::2]/onvif", scopes)
+            + "</d:ProbeMatches></SOAP-ENV:Body></SOAP-ENV:Envelope>";
+        List<Discovery.Device> found = Discovery.parse(xml);
+        check(found.size() == 1, "Replies without an ID or IPv4 address are skipped");
+        Discovery.Device bell = found.get(0);
+        check(bell.id.equals("urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7") && bell.host.equals("192.168.1.77"), "ID and IPv4 host come from the reply");
+        check(bell.name.equals("Reolink Video Doorbell PoE") && bell.hardware.equals("D340P"), "Scopes are URL-decoded");
+        check(bell.doorbell() && bell.reolink(), "A Reolink doorbell is recognised");
+        check(bell.label().equals("Reolink Video Doorbell PoE (D340P) — 192.168.1.77"), "Label names the model and address");
+        Discovery.Device cam = new Discovery.Device("urn:uuid:c", "192.168.1.20", "Reolink RLC-810A", "RLC-810A");
+        Discovery.Device other = new Discovery.Device("urn:uuid:o", "192.168.1.5", "IPC", "");
+        check(Discovery.sorted(Arrays.asList(other, cam, bell)).get(0) == bell && Discovery.sorted(Arrays.asList(other, cam, bell)).get(2) == other, "Doorbells first, others last");
+        check(Discovery.obvious(Arrays.asList(other, cam, bell)) == bell, "The only doorbell is picked");
+        check(Discovery.obvious(Arrays.asList(other, cam)) == cam, "Without a doorbell, the only Reolink camera is picked");
+        check(Discovery.obvious(Arrays.asList(bell, new Discovery.Device("urn:uuid:b2", "192.168.1.78", "Reolink Video Doorbell", ""))) == null, "Two doorbells are left to the person");
+        check(Discovery.obvious(Collections.singletonList(other)) == null, "An unknown camera is not picked on its own");
+        Map<String, Object> m = base(); m.put("doorbell", "urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7");
+        check(new Settings(m).doorbell.equals("urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7"), "Picked doorbell ID is kept");
+        Map<String, Object> badId = base(); badId.put("doorbell", "urn:uuid:<x>");
+        fails(() -> new Settings(badId), "Pick the doorbell", "Odd doorbell IDs are rejected");
     }
 }
