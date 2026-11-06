@@ -10,6 +10,6 @@ final class FailureRouting {
     /** Nothing listens at the address, or nothing is there at all: what an address change looks like. */
     static boolean unreachable(Exception error) {
         return error instanceof java.net.ConnectException || error instanceof java.net.NoRouteToHostException
-            || error instanceof java.net.SocketTimeoutException;
+            || error instanceof RtspClient.ConnectTimeout;
     }
 }
