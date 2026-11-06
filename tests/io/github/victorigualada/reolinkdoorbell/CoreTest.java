@@ -272,6 +272,15 @@ public final class CoreTest {
         Map<String, Object> m = base(); m.put("doorbell", "urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7");
         check(new Settings(m).doorbell.equals("urn:uuid:2419d68a-2dd2-21b2-a205-ec71dbd5e1a7"), "Picked doorbell ID is kept");
         Map<String, Object> badId = base(); badId.put("doorbell", "urn:uuid:<x>");
-        fails(() -> new Settings(badId), "Pick the doorbell", "Odd doorbell IDs are rejected");
+        badId.put("host", "192.168.1.77");
+        Settings kept = new Settings(badId);
+        check(kept.doorbell.isEmpty() && kept.host.equals("192.168.1.77"), "An odd doorbell ID is dropped, and the other settings are kept");
+        check(Discovery.parse("<d:ProbeMatches>" + match("urn:uuid:{abc}", "http://192.168.1.30/onvif", scopes) + "</d:ProbeMatches>").isEmpty(), "Cameras with IDs the plugin cannot store are not listed");
+        Discovery.Device foreign = new Discovery.Device("urn:uuid:f", "192.168.1.6", "Acme Video Doorbell", "");
+        check(Discovery.obvious(Arrays.asList(foreign, bell)) == bell, "Another brand's doorbell does not stop the only Reolink doorbell being picked");
+        check(Discovery.obvious(Arrays.asList(foreign, other)) == null, "Another brand's doorbell is never picked");
+        check(Discovery.obvious(Arrays.asList(foreign, cam)) == cam, "Beside another brand's doorbell, the only Reolink camera is picked");
+        check(FailureRouting.unreachable(new RtspClient.ConnectTimeout()) && FailureRouting.unreachable(new java.net.ConnectException()), "No answer to the connection looks like a moved doorbell");
+        check(!FailureRouting.unreachable(new java.net.SocketTimeoutException("Read timed out")), "A slow reply on an open connection does not");
     }
 }
