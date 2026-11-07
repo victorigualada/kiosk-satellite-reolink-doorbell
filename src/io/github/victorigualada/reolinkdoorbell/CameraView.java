@@ -35,6 +35,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     private boolean statusError, audioInterrupted;
     private Talkback talk;
     private boolean framed;
+    private long prepareRetry = 2000;
     private volatile Talkback ready; // Set up ahead while the viewer is open, so the green phone opens the microphone fast.
     private boolean talking;
     private final Application application;
@@ -175,21 +176,40 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         if (talk != null) { stopTalk(); return; }
         if (!settings.talkEnabled) { showMessage("Two-way audio is turned off in plugin settings", false); return; }
         Talkback next = ready; ready = null;
+        Exception known = next == null ? null : next.permanentFailure();
         if (next != null && !next.usable()) { next.close(); next = null; }
+        // A fault found while preparing that a new attempt would only hit again: say so now, without a second connect.
+        // The next tap tries afresh, in case it was fixed meanwhile (the microphone permission, say).
+        if (known != null) { showMessage(Failures.describe(known, "Two-way audio is unavailable"), true); return; }
         if (next == null) next = newTalk();
         // Answering is a conversation: hear the visitor too.
         if (listeningMuted || audioInterrupted) { audioInterrupted = false; listeningMuted = false; styleListen(); applyMute(); }
-        talk = next; styleTalk(); next.start();
+        talk = next; styleTalk();
+        // The prepared session may have ended just now, before the tap reached it: start a new one instead.
+        if (!next.start()) { next.close(); next = newTalk(); talk = next; next.start(); }
+        if (stopping) next.close(); // Closed from the plugin thread meanwhile.
     }
     private Talkback newTalk() {
         final Talkback[] owner = new Talkback[1];
         owner[0] = new Talkback(getContext(), settings, new Talkback.Listener() {
             public void status(String text, boolean error) { post(() -> { if (talk == owner[0]) showMessage(text, error); }); }
+            public void preparedEnded(Exception error) {
+                post(() -> {
+                    if (ready != owner[0]) return;
+                    ready = null;
+                    if (disposed || stopping || error == null) return;
+                    // Keep a fault that will not go away to show on the tap; otherwise try again, less often each time.
+                    if (Talkback.isPermanent(error)) { ready = owner[0]; return; }
+                    long wait = prepareRetry; prepareRetry = Math.min(prepareRetry * 2, 60_000);
+                    postDelayed(CameraView.this::prepareTalk, wait);
+                });
+            }
             public void microphoneActive() { post(() -> { if (talk == owner[0] && !disposed) { talking = true; styleTalk(); applyMute(); } }); }
             public void sent(short[] pcm, int n, int rate, long endMicros) { StreamPlayer p = player; if (p != null) p.sent(pcm, n, rate, endMicros); }
             public void finished() {
                 post(() -> {
                     // Whoever ended it (the green phone, the time limit, a lost focus), get the next one ready.
+                    prepareRetry = 2000;
                     if (!disposed) postDelayed(CameraView.this::prepareTalk, 1000);
                     if (talk != owner[0]) return;
                     talk = null; talking = false;
@@ -202,7 +222,9 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
     /** Connects the next talk session in the background without taking the doorbell's talk channel; it stays silent until the green phone. */
     private void prepareTalk() {
         if (!settings.talkEnabled || disposed || stopping || talk != null || ready != null) return;
-        ready = newTalk(); ready.prepare();
+        Talkback next = newTalk(); ready = next; next.prepare();
+        // stopTransports may have run on the plugin thread between the check above and now; it sets stopping first.
+        if (stopping || disposed) { ready = null; next.close(); }
     }
     private void stopTalk() {
         Talkback current = talk; talk = null; talking = false;

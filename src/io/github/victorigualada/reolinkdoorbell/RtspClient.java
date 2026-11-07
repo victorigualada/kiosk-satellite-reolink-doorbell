@@ -79,7 +79,10 @@ final class RtspClient implements AutoCloseable {
         for (int i = 0; i < 1024; i++) {
             Protocol.Message m = Protocol.read(in);
             if (m.channel >= 0) continue;
-            if (!String.valueOf(sent).equals(m.headers.get("cseq"))) throw new IOException("RTSP response sequence mismatch");
+            String cseq = m.headers.get("cseq");
+            // A late reply to a request sent without waiting, such as a keepalive.
+            if (cseq != null && cseq.matches("[0-9]{1,9}") && Integer.parseInt(cseq) < sent) continue;
+            if (!String.valueOf(sent).equals(cseq)) throw new IOException("RTSP response sequence mismatch");
             return m;
         } throw new IOException("RTSP response not received");
     }
