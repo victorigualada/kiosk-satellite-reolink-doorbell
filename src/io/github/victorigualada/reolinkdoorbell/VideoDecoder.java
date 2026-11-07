@@ -1,0 +1,214 @@
+// SPDX-License-Identifier: Apache-2.0
+package io.github.victorigualada.reolinkdoorbell;
+
+import android.media.*;
+import android.os.Build;
+import android.view.Surface;
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/** One worker owns parameter discovery, hardware-first selection and fallback. */
+final class VideoDecoder implements AutoCloseable {
+    private final Sdp.Track track; private Surface surface;
+    private StreamPlayer.Listener listener; private final AtomicBoolean closed; private final Runnable rendered;
+    private final boolean hevc;
+    private final Map<Integer, byte[]> sets = new HashMap<>();
+    private MediaCodec codec; private MediaFormat format; private VideoParameters parameters;
+    private List<DecoderOrder.Candidate> candidates = Collections.emptyList();
+    private final StringBuilder skipped = new StringBuilder();
+    private int nextCandidate; private long epoch = -1; private boolean started, waitForKey = true;
+    VideoDecoder(Sdp.Track track, AtomicBoolean closed, Runnable rendered) throws Exception {
+        this.track = track; this.closed = closed; this.rendered = rendered; hevc = "H265".equals(track.codec);
+        Sdp.videoMime(track);
+        for (String key : hevc ? new String[] {"sprop-vps", "sprop-sps", "sprop-pps"} : new String[] {"sprop-parameter-sets"}) {
+            String encoded = track.fmtp.get(key); if (encoded == null) continue;
+            if (encoded.length() > 24000) throw new IOException("Video SDP parameters exceed safety limit");
+            for (String item : encoded.split(",", -1)) {
+                byte[] nal;
+                try { nal = android.util.Base64.decode(item, android.util.Base64.DEFAULT); }
+                catch (IllegalArgumentException e) { throw new IOException("Invalid video SDP parameter encoding"); }
+                remember(hevc ? nal : lowDelay(nal));
+            }
+        }
+        // Decoder creation waits for input: SDP may omit sets, in which case
+        // the first in-band VPS/SPS/PPS supplies the real dimensions/profile.
+    }
+    /** The SPS promising no reordering, so the decoder shows each frame at once; other NAL units pass through. */
+    private static byte[] lowDelay(byte[] nal) {
+        if (nal.length == 0 || (nal[0] & 31) != 7) return nal;
+        try { return SpsPatch.lowDelay(nal); } catch (IOException e) { return nal; }
+    }
+    private boolean keyType(int t) { return hevc ? t >= 16 && t <= 23 : t == 5; }
+    /** The view's surface and listener arrive after the connection when the stream starts before the viewer. */
+    void attach(Surface surface, StreamPlayer.Listener listener) { this.surface = surface; this.listener = listener; }
+    /**
+     * Creates the codec from the SDP's parameter sets before the keyframe arrives, so its start-up overlaps the wait.
+     * If the keyframe brings different sets, input() recreates it as before.
+     */
+    void prepare() throws Exception { if (parameters == null && surface != null && complete() && !closed.get()) detect(); }
+    private int type(byte[] nal) { return hevc ? (nal[0] & 0x7e) >> 1 : nal[0] & 31; }
+    private boolean remember(byte[] nal) throws IOException {
+        if (nal.length == 0) throw new IOException("Empty video parameter set");
+        int type = type(nal);
+        if (!(hevc ? type >= 32 && type <= 34 : type == 7 || type == 8)) return false;
+        if (nal.length > 16384) throw new IOException("Video parameter set exceeds safety limit");
+        byte[] previous = sets.put(type, nal); return !Arrays.equals(previous, nal);
+    }
+    private boolean complete() { return hevc ? sets.containsKey(32) && sets.containsKey(33) && sets.containsKey(34) : sets.containsKey(7) && sets.containsKey(8); }
+    private void detect() throws Exception {
+        parameters = VideoParameters.sps(sets.get(hevc ? 33 : 7), hevc);
+        int profile = profile(parameters), level = level(parameters);
+        if (profile == 0 || level == 0 || parameters.chroma != 1) throw new IOException("Selected video profile/chroma is not supported by this player");
+        format = MediaFormat.createVideoFormat(Sdp.videoMime(track), parameters.width, parameters.height);
+        // No KEY_LEVEL: Reolink labels even its small sub stream level 5.1, which hardware decoders that handle the
+        // actual size fine refuse, leaving only the slower software decoder. The size check below still applies.
+        format.setInteger(MediaFormat.KEY_PROFILE, profile);
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Protocol.MAX_FRAME);
+        csd();
+        List<DecoderOrder.Candidate> available = new ArrayList<>();
+        for (MediaCodecInfo info : codecs()) {
+            if (info.isEncoder()) continue;
+            try {
+                MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(Sdp.videoMime(track));
+                boolean supported = caps.isFormatSupported(format);
+                boolean software = Build.VERSION.SDK_INT >= 29 ? info.isSoftwareOnly() : DecoderOrder.software(info.getName());
+                available.add(new DecoderOrder.Candidate(info.getName(), software, supported));
+            } catch (IllegalArgumentException ignored) { /* Other MIME, no usable capabilities. */ }
+        }
+        candidates = DecoderOrder.choose(available); nextCandidate = 0; skipped.setLength(0);
+        for (DecoderOrder.Candidate c : available) if (!c.supported && !c.software) skipped.append(", ").append(c.name).append(" unsupported");
+        listener.size(parameters.displayWidth, parameters.displayHeight);
+        startNext();
+    }
+    private static MediaCodecInfo[] codecList;
+    /** Listing the tablet's codecs can take a noticeable moment the first time; the plugin warms this up at start. */
+    static synchronized MediaCodecInfo[] codecs() {
+        if (codecList == null) codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
+        return codecList;
+    }
+    /**
+     * Chip vendors' own low-latency switches, for decoders that hold frames back without them (as Moonlight does).
+     * Unknown keys are ignored by codecs. Returns which family was asked, or "".
+     */
+    static String vendorLowLatency(MediaFormat format, String name) {
+        String n = name.toLowerCase(Locale.ROOT);
+        if (n.startsWith("c2.qti") || n.startsWith("omx.qcom")) {
+            format.setInteger("vendor.qti-ext-dec-picture-order.enable", 1);
+            format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1); return "Qualcomm";
+        }
+        if (n.startsWith("c2.exynos") || n.startsWith("omx.exynos")) { format.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1); return "Exynos"; }
+        if (n.startsWith("c2.amlogic") || n.startsWith("omx.amlogic")) { format.setInteger("vendor.low-latency.enable", 1); return "Amlogic"; }
+        if (n.startsWith("c2.hisi") || n.startsWith("omx.hisi")) {
+            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1);
+            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1); return "HiSilicon";
+        }
+        return "";
+    }
+    private boolean lowLatency(MediaCodec codec) {
+        try { return codec.getCodecInfo().getCapabilitiesForType(Sdp.videoMime(track)).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency); }
+        catch (Exception e) { return false; }
+    }
+    /** Codec configuration from the current sets; kept current so a decoder fallback starts from the latest ones. */
+    private void csd() throws IOException {
+        if (hevc) format.setByteBuffer("csd-0", ByteBuffer.wrap(Protocol.hevcConfiguration(Arrays.asList(sets.get(32), sets.get(33), sets.get(34)))));
+        else { format.setByteBuffer("csd-0", ByteBuffer.wrap(annex(sets.get(7)))); format.setByteBuffer("csd-1", ByteBuffer.wrap(annex(sets.get(8)))); }
+    }
+    private static byte[] annex(byte[] nal) { byte[] result = new byte[nal.length + 4]; result[3] = 1; System.arraycopy(nal, 0, result, 4, nal.length); return result; }
+    private void startNext() throws Exception {
+        releaseCodec();
+        while (nextCandidate < candidates.size() && !closed.get()) {
+            DecoderOrder.Candidate selected = candidates.get(nextCandidate++);
+            try {
+                codec = MediaCodec.createByCodecName(selected.name);
+                // A live doorbell needs no reordering: ask for each frame as soon as it decodes, where the codec allows it.
+                boolean standard = Build.VERSION.SDK_INT >= 30 && lowLatency(codec);
+                if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, standard ? 1 : 0);
+                String vendor = vendorLowLatency(format, selected.name);
+                codec.configure(format, surface, null, 0); codec.start(); started = true; waitForKey = true; epoch = -1;
+                listener.status(track.codec + " " + parameters.displayWidth + "×" + parameters.displayHeight + " — " + (selected.software ? "software" : "hardware")
+                    + " decoder " + selected.name + ", low latency " + (standard ? "on" : vendor.isEmpty() ? "unavailable" : vendor)
+                    + (skipped.length() == 0 ? "" : " (" + skipped.substring(2) + ")"), false);
+                return;
+            } catch (Exception ignored) { releaseCodec(); skipped.append(", ").append(selected.name).append(" failed"); }
+        }
+        if (!closed.get()) throw new IOException("No working hardware or software decoder for " + track.codec + " " + parameters.width + "x" + parameters.height + " (profile " + parameters.profile + ", " + parameters.bitDepth + "-bit). Try medium or low quality");
+    }
+    void input(byte[] data, long timestamp) throws Exception {
+        if (closed.get()) return;
+        boolean changed = false, key = false;
+        if (!hevc) data = SpsPatch.accessUnit(data);
+        for (byte[] nal : VideoParameters.annexB(data)) {
+            changed |= remember(nal); int t = type(nal);
+            key |= keyType(t);
+        }
+        if (changed && parameters != null) {
+            // A keyframe often repeats the SDP's sets with small differences. Keep the codec, which reads the
+            // in-band sets anyway, unless the picture itself changes.
+            VideoParameters next = complete() ? VideoParameters.sps(sets.get(hevc ? 33 : 7), hevc) : null;
+            if (next == null || next.width != parameters.width || next.height != parameters.height || next.profile != parameters.profile
+                    || next.chroma != parameters.chroma || next.bitDepth != parameters.bitDepth) { releaseCodec(); parameters = null; }
+            else { parameters = next; csd(); }
+        }
+        if (parameters == null) {
+            // Create the codec with the keyframe in hand: its in-band sets often differ from the SDP ones,
+            // and creating it earlier would mean creating it twice right when the first image is due.
+            if (!complete() || !key) return;
+            detect();
+        }
+        if (closed.get() || codec == null || waitForKey && !key) return;
+        for (;;) {
+            try {
+                drain(); int index = codec.dequeueInputBuffer(10000); if (index < 0) return;
+                ByteBuffer buffer = codec.getInputBuffer(index);
+                if (buffer == null || data.length > buffer.capacity()) throw new IOException("Encoded frame exceeds decoder input capacity");
+                buffer.clear(); buffer.put(data); if (epoch < 0) epoch = timestamp;
+                codec.queueInputBuffer(index, 0, data.length, ((timestamp - epoch) & 0xffffffffL) * 1000000L / track.rate, 0);
+                waitForKey = false; drain(); return;
+            } catch (IllegalStateException e) {
+                // Android codec runtime failures are bounded: try each remaining
+                // compatible implementation once, retaining no unbounded frames.
+                listener.decoderFallback(); startNext(); if (closed.get() || codec == null || !key) return;
+            }
+        }
+    }
+    boolean fallbackAfterStall() throws Exception {
+        if (parameters == null || nextCandidate >= candidates.size() || closed.get()) return false;
+        startNext(); return codec != null;
+    }
+    private void drain() throws Exception {
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        for (;;) {
+            int index = codec.dequeueOutputBuffer(info, 0);
+            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return;
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                MediaFormat actual = codec.getOutputFormat();
+                int width = actual.getInteger(MediaFormat.KEY_WIDTH), height = actual.getInteger(MediaFormat.KEY_HEIGHT);
+                if (actual.containsKey("crop-right")) width = actual.getInteger("crop-right") - actual.getInteger("crop-left") + 1;
+                if (actual.containsKey("crop-bottom")) height = actual.getInteger("crop-bottom") - actual.getInteger("crop-top") + 1;
+                listener.size(width, height);
+            } else if (index >= 0) {
+                try { if (!closed.get()) rendered.run(); } finally { codec.releaseOutputBuffer(index, !closed.get()); }
+            }
+        }
+    }
+    private static int profile(VideoParameters p) {
+        if (p.hevc) return p.profile == 1 && p.bitDepth == 8 ? 1 : p.profile == 2 && p.bitDepth <= 10 ? 2 : 0;
+        int[] ids = {66, 77, 88, 100, 110, 122, 244};
+        for (int i = 0; i < ids.length; i++) if (ids[i] == p.profile) return 1 << i;
+        return 0;
+    }
+    private static int level(VideoParameters p) {
+        int[] levels = p.hevc ? new int[] {30, 60, 63, 90, 93, 120, 123, 150, 153, 156, 180, 183, 186} : new int[] {10, 9, 11, 12, 13, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62};
+        for (int i = 0; i < levels.length; i++) if (levels[i] == p.level) return 1 << (p.hevc ? i * 2 + (p.highTier ? 1 : 0) : i);
+        return 0;
+    }
+    private void releaseCodec() {
+        if (codec == null) return;
+        try { if (started) codec.stop(); } catch (RuntimeException ignored) {}
+        try { codec.release(); } catch (RuntimeException ignored) {}
+        codec = null; started = false;
+    }
+    public void close() { releaseCodec(); }
+}
