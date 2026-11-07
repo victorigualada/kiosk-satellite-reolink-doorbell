@@ -46,6 +46,7 @@ assert fields['password']['type'] == 'secret' and fields['password']['default'] 
 assert fields['visitorEntity']['type'] == 'entity' and fields['visitorEntity']['domain'] == 'binary_sensor'
 assert fields['lockEntity']['type'] == 'entity' and fields['lockEntity']['domain'] == 'lock'
 assert fields['talkEnabled']['default'] is True and fields['talkSeconds']['visibleWhen'] == {'key': 'talkEnabled', 'equals': True}
+assert fields['echoCanceller']['default'] is True and fields['echoCanceller']['visibleWhen'] == {'key': 'talkEnabled', 'equals': True} and 'echo' not in fields
 assert fields['controls']['default'] == 'Bottom'
 assert 'https' not in fields, 'Test connection always uses plain HTTP'
 # Community Plugins shows a 256 by 256 PNG of at most 256 KB.

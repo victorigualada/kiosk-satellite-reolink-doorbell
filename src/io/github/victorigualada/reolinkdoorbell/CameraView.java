@@ -186,8 +186,7 @@ final class CameraView extends FrameLayout implements TextureView.SurfaceTexture
         owner[0] = new Talkback(getContext(), settings, new Talkback.Listener() {
             public void status(String text, boolean error) { post(() -> { if (talk == owner[0]) showMessage(text, error); }); }
             public void microphoneActive() { post(() -> { if (talk == owner[0] && !disposed) { talking = true; styleTalk(); applyMute(); } }); }
-            public void speaking(boolean speaking) { StreamPlayer p = player; if (p != null && !"Off".equals(settings.echo)) p.setDucked(speaking); }
-            public double far() { StreamPlayer p = player; return p == null ? 0 : p.farLevel(); }
+            public void sent(short[] pcm, int n, int rate, long endMicros) { StreamPlayer p = player; if (p != null) p.sent(pcm, n, rate, endMicros); }
             public void finished() {
                 post(() -> {
                     // Whoever ended it (the green phone, the time limit, a lost focus), get the next one ready.
